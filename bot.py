@@ -1,13 +1,16 @@
 # bot.py
 import asyncio
+from dotenv import load_dotenv
+import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message
 from SafoneAPI import SafoneAPI
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+load_dotenv()  # load BOT_TOKEN from .env
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 api = SafoneAPI()
-bot = Bot(BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message()
