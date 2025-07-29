@@ -50,10 +50,10 @@ async def chatgpt_handler(message: types.Message):
             "dialog_messages": [{"bot": "", "user": ""}]
         }
 
-        # Safone API request (✅ UPDATED URL)
+        # Safone API request (✅ OFFICIAL URL from developer)
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://api.safone.co/chatgpt",
+                "https://api.safone.dev/chatgpt",
                 json=payload,
                 headers={"Content-Type": "application/json"},
             )
