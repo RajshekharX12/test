@@ -5,7 +5,8 @@ import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
-from aiogram.types import ChatActions
+-from aiogram.types import ChatActions
++from aiogram.enums.chat_action import ChatAction  # :contentReference[oaicite:1]{index=1}
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from dotenv import load_dotenv
@@ -39,7 +40,6 @@ async def process_query(user_id: int, query: str) -> str:
     history = conversation_histories.get(user_id, [])
     history.append({"role": "user", "content": query})
 
-    # build prompt
     lines = [PROMPT_INTRO] + [
         f"{'User:' if msg['role']=='user' else 'Bot:'} {msg['content']}"
         for msg in history
@@ -57,9 +57,9 @@ async def process_query(user_id: int, query: str) -> str:
     return answer
 
 async def keep_typing(chat_id: int, stop_event: asyncio.Event):
-    """Keep sending ChatActions.TYPING until stop_event is set."""
+    """Keep sending ChatAction.TYPING until stop_event is set."""
     while not stop_event.is_set():
-        await bot.send_chat_action(chat_id, ChatActions.TYPING)
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)  # :contentReference[oaicite:2]{index=2}
         await asyncio.sleep(4)
 
 # ─── /start HANDLER ────────────────────────────────────────────
@@ -113,4 +113,5 @@ async def inline_query_handler(inline_q: types.InlineQuery):
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting with typing indicators…")
     dp.run_polling(bot)
+
 
