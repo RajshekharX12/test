@@ -98,7 +98,7 @@ async def inline_query_handler(inline_q: types.InlineQuery):
             title="Bhai ka jawab",
             description=(safe[:50] + "...") if len(safe) > 50 else safe,
             input_message_content=types.InputTextMessageContent(
-                text=safe,
+                message_text=safe,
                 parse_mode=ParseMode.HTML
             ),
         )
@@ -116,6 +116,7 @@ async def inline_query_handler(inline_q: types.InlineQuery):
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting with typing indicators…")
     dp.run_polling(bot)
+
 
 
 
