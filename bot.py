@@ -1,6 +1,5 @@
 import os
 import re
-import html
 import logging
 import asyncio
 import httpx
@@ -19,18 +18,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# ─── LOGGING ──────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ─── BOT & AI CLIENT ──────────────────────────────────────────
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 api = SafoneAPI()
 
 # ─── MEMORY CONFIG ─────────────────────────────────────────────
 conversation_histories: dict[int, list[dict[str, str]]] = {}
-MAX_HISTORY = 20  # keep last 20 messages per user
+MAX_HISTORY = 20  # keep the last 20 messages per user
+
 SYSTEM_PROMPT = (
     "You are Jarvis, a professional AI assistant. "
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
@@ -67,19 +65,11 @@ async def checknum_concurrent(nums: list[str]) -> list[tuple[str, str]]:
     return await asyncio.gather(*(sem_check(n) for n in normalized))
 
 async def process_query(user_id: int, text: str) -> str:
-    """
-    Append user message to memory, build prompt, call ChatGPT with retry-on-context-error,
-    update memory, return answer.
-    """
     history = conversation_histories.setdefault(user_id, [])
-
-    # Append the new user message
     history.append({"role": "user", "content": text})
-    # Trim to  MAX_HISTORY
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
 
-    # Build the prompt
     def build_prompt():
         return SYSTEM_PROMPT + "".join(
             f"{'Master:' if m['role']=='user' else 'Jarvis:'} {m['content']}\n"
@@ -87,16 +77,13 @@ async def process_query(user_id: int, text: str) -> str:
         )
 
     prompt = build_prompt()
-
     try:
         resp = await api.chatgpt(prompt)
     except GenericApiError as e:
         if "reduce the context" in str(e).lower():
-            logger.warning("Context too large, trimming history and retrying")
-            # Keep only the last user message
-            last_user = history[-1]
+            last = history[-1]
             history.clear()
-            history.append(last_user)
+            history.append(last)
             prompt = build_prompt()
             resp = await api.chatgpt(prompt)
         else:
@@ -104,15 +91,12 @@ async def process_query(user_id: int, text: str) -> str:
 
     answer = resp.message or "I'm sorry, something went wrong."
 
-    # Record Jarvis's reply
     history.append({"role": "bot", "content": answer})
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
-
     return answer
 
 async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
-    """Send typing indicator until stop_evt is set."""
     while not stop_evt.is_set():
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
         await asyncio.sleep(4)
@@ -121,8 +105,7 @@ async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Hello, Master! I'm Jarvis—send +888 numbers or ask any question; "
-        "I'll remember and reply."
+        "👋 Hello, Master! I'm Jarvis—send +888 numbers or ask any question, and I'll remember and reply."
     )
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
@@ -132,21 +115,21 @@ async def dm_handler(message: types.Message):
     if not text:
         return
 
-    # Append to memory immediately
-    conversation_histories.setdefault(user_id, []).append({"role": "user", "content": text})
-    if len(conversation_histories[user_id]) > MAX_HISTORY:
-        del conversation_histories[user_id][:-MAX_HISTORY]
+    # Record user message
+    history = conversation_histories.setdefault(user_id, [])
+    history.append({"role": "user", "content": text})
+    if len(history) > MAX_HISTORY:
+        del history[:-MAX_HISTORY]
 
-    # Number-detection (split on commas/new-lines)
+    # ─── +888 NUMBER DETECTION ───────────────────────────────
     raw_tokens = re.split(r"[,\n]+", text)
-    nums = []
+    nums: list[str] = []
     for tok in raw_tokens:
         tok = tok.strip()
         cand = re.sub(r"\s+", "", tok)
         if re.fullmatch(r"\+?\d{11,}", cand) and cand.lstrip("+").startswith("888"):
             nums.append(cand.lstrip("+"))
         else:
-            # accumulate inner parts
             cleaned = ""
             for part in tok.split():
                 cleaned += re.sub(r"\D", "", part)
@@ -155,7 +138,7 @@ async def dm_handler(message: types.Message):
             if len(cleaned) >= 11 and cleaned.startswith("888"):
                 nums.append(cleaned)
 
-    # Dedupe preserving order
+    # Deduplicate, preserve order
     seen = set()
     nums = [n for n in nums if not (n in seen or seen.add(n))]
 
@@ -176,9 +159,11 @@ async def dm_handler(message: types.Message):
             full_reply = "\n".join(asc_lines + [""] + desc_lines)
 
             await message.reply(full_reply)
-            conversation_histories[user_id].append({"role": "bot", "content": full_reply})
-            if len(conversation_histories[user_id]) > MAX_HISTORY:
-                del conversation_histories[user_id][:-MAX_HISTORY]
+
+            # Record bot reply
+            history.append({"role": "bot", "content": full_reply})
+            if len(history) > MAX_HISTORY:
+                del history[:-MAX_HISTORY]
 
             await status.delete()
         finally:
@@ -186,21 +171,25 @@ async def dm_handler(message: types.Message):
             await typer
         return
 
-    # Free-form ChatGPT fallback
+    # ─── FREE-FORM CHATGPT FALLBACK ────────────────────────────
     status = await message.reply("🧠 Thinking…")
     stop_evt = asyncio.Event()
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
     try:
         answer = await process_query(user_id, text)
-        await status.edit_text(html.escape(answer), parse_mode=None)
+
+        # No html.escape here, so apostrophes remain as `'`
+        await status.edit_text(answer, parse_mode=None)
+
+        history.append({"role": "bot", "content": answer})
+        if len(history) > MAX_HISTORY:
+            del history[:-MAX_HISTORY]
     finally:
         stop_evt.set()
         await typer
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Jarvis is starting with smart context‑trimming…")
+    logger.info("🚀 Jarvis is starting—no more HTML entities in replies.")
     dp.run_polling(bot)
-
-
 
