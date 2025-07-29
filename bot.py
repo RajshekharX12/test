@@ -2,6 +2,8 @@ import os
 import re
 import logging
 import asyncio
+import random
+import httpx
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
@@ -17,7 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── BOT & API SETUP ───────────────────────────────────────────
@@ -33,9 +35,23 @@ SYSTEM_PROMPT = (
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
 )
 
-# ─── CORE HELPERS ──────────────────────────────────────────────
+# ─── FUN STATUS MESSAGES ───────────────────────────────────────
+STATUS_MESSAGES = [
+    "🤖 Jarvis is charging its gears...",
+    "😴 Jarvis is catching some zzz...",
+    "🐢 Jarvis is in turtle mode, please wait...",
+    "🍕 Jarvis is grabbing a slice, hang tight...",
+    "🎯 Jarvis is locking onto the target...",
+    "🚀 Jarvis is fueling up thrusters...",
+    "🦾 Jarvis is flexing its robotic arm...",
+    "🎩 Jarvis is pulling a rabbit out of a hat...",
+    "🔍 Jarvis is magnifying clues...",
+    "🎵 Jarvis is humming a tune..."
+]
+
+# ─── HELPERS ───────────────────────────────────────────────────
 async def process_query(user_id: int, text: str) -> str:
-    """Append to memory, build prompt, call ChatGPT (with context-trim), update memory."""
+    """Append to memory, build prompt, call ChatGPT with retry, update memory."""
     history = conversation_histories.setdefault(user_id, [])
     history.append({"role": "user", "content": text})
 
@@ -50,11 +66,11 @@ async def process_query(user_id: int, text: str) -> str:
         resp = await api.chatgpt(prompt)
     except GenericApiError as e:
         if "reduce the context" in str(e).lower():
-            # retry with only the last user message
+            # retry with only last user message
             last = history[-1]
             history.clear()
             history.append(last)
-            prompt = build_prompt()
+            prompt = SYSTEM_PROMPT + f"Master: {last['content']}\n"
             resp = await api.chatgpt(prompt)
         else:
             raise
@@ -63,26 +79,22 @@ async def process_query(user_id: int, text: str) -> str:
     history.append({"role": "bot", "content": answer})
     return answer
 
-async def get_status_message() -> str:
-    """Ask Jarvis for a fresh, playful status each time."""
-    prompt = (
-        "You are Jarvis, a witty AI assistant. "
-        "In one playful sentence, describe what you’re doing right now."
-    )
-    resp = await api.chatgpt(prompt)
-    return (resp.message or "Jarvis is at your service...").strip().strip('"')
-
 async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
+    """Keep the 'typing' indicator alive."""
     while not stop_evt.is_set():
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
         await asyncio.sleep(4)
+
+def pick_status() -> str:
+    """Choose a random fun status message."""
+    return random.choice(STATUS_MESSAGES)
 
 # ─── HANDLERS ──────────────────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Hello, Master! I'm Jarvis—send me text, documents, or photos, "
-        "and I'll remember and help with anything."
+        "and I'll remember everything and help out."
     )
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
@@ -92,12 +104,11 @@ async def dm_handler(message: types.Message):
     if not text:
         return
 
-    # record user text
+    # record user message
     conversation_histories.setdefault(user_id, []).append({"role": "user", "content": text})
 
-    # status prompt
-    status_text = await get_status_message()
-    status = await message.reply(status_text)
+    # send a random status
+    status = await message.reply(pick_status())
     stop_evt = asyncio.Event()
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
 
@@ -112,18 +123,14 @@ async def dm_handler(message: types.Message):
 async def document_handler(message: types.Message):
     doc = message.document
     user_id = message.from_user.id
-
-    # record the event
     conversation_histories.setdefault(user_id, []).append({
-        "role": "user",
-        "content": f"<Document {doc.file_name}>"
+        "role": "user", "content": f"<Document {doc.file_name}>"
     })
 
     file = await bot.get_file(doc.file_id)
     url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
 
-    status_text = await get_status_message()
-    status = await message.reply(status_text)
+    status = await message.reply(pick_status())
     stop_evt = asyncio.Event()
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
 
@@ -131,8 +138,6 @@ async def document_handler(message: types.Message):
         prompt = f"Please analyze the content of the document at this URL:\n{url}"
         answer = await process_query(user_id, prompt)
         await status.edit_text(answer, parse_mode=None)
-
-        # record Jarvis’s reply
         conversation_histories[user_id].append({"role": "bot", "content": answer})
     finally:
         stop_evt.set()
@@ -142,18 +147,14 @@ async def document_handler(message: types.Message):
 async def photo_handler(message: types.Message):
     photo = message.photo[-1]
     user_id = message.from_user.id
-
-    # record the event
     conversation_histories.setdefault(user_id, []).append({
-        "role": "user",
-        "content": "<Photo>"
+        "role": "user", "content": "<Photo>"
     })
 
     file = await bot.get_file(photo.file_id)
     url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
 
-    status_text = await get_status_message()
-    status = await message.reply(status_text)
+    status = await message.reply(pick_status())
     stop_evt = asyncio.Event()
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
 
@@ -161,8 +162,6 @@ async def photo_handler(message: types.Message):
         prompt = f"Please describe and interpret the image at this URL:\n{url}"
         answer = await process_query(user_id, prompt)
         await status.edit_text(answer, parse_mode=None)
-
-        # record Jarvis’s reply
         conversation_histories[user_id].append({"role": "bot", "content": answer})
     finally:
         stop_evt.set()
@@ -170,5 +169,5 @@ async def photo_handler(message: types.Message):
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Jarvis is starting with file & photo analysis…")
+    logger.info("🚀 Jarvis is starting with fun status messages…")
     dp.run_polling(bot)
