@@ -1,82 +1,114 @@
 import os
 import html
+import uuid
 import logging
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from dotenv import load_dotenv
 
-# ─── LOAD ENV VARIABLES ────────────────────────────────────────
+# ─── LOAD ENV ─────────────────────────────────────────────────
 load_dotenv()
 API_TOKEN = os.getenv("BOT_TOKEN")
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# ─── LOGGING SETUP ─────────────────────────────────────────────
+# ─── LOGGING ──────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ─── BOT INITIALIZATION ────────────────────────────────────────
+# ─── BOT & API SETUP ──────────────────────────────────────────
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 api = SafoneAPI()
 
-# ─── HANDLER: "bhai" COMMAND ───────────────────────────────────
-@dp.message(F.text.startswith("bhai"))
-async def chatgpt_handler(message: types.Message):
-    try:
-        # Extract the query
-        parts = message.text.split(maxsplit=1)
-        query = parts[1] if len(parts) > 1 else None
-        if not query and message.reply_to_message:
-            query = message.reply_to_message.text
-        if not query:
-            return await message.reply("❗ Bhai, mujhe question toh de...")
+# ─── MEMORY CONFIG ────────────────────────────────────────────
+# Holds a list of {"role": "user"|"bot", "content": str} per user_id
+conversation_histories: dict[int, list[dict[str,str]]] = {}
+MAX_HISTORY_PAIRS = 10
 
-        # Input length check
-        if len(query) > 1000:
-            return await message.reply("⚠️ Bhai, question zyada lamba ho gaya. Thoda chhota puchho.")
+# Instruction prefixed to every prompt
+PROMPT_INTRO = (
+    "You are the user's friend. Reply in friendly Hindi with emojis, "
+    "using 'bhai' style words like 'Arey bhai', 'Nahi bhai', etc.\n\n"
+)
 
-        # Send "typing" message
-        status = await message.reply("🧠 Generating answer...")
+async def process_query(user_id: int, query: str) -> str:
+    """Calls SafoneAPI.chatgpt with conversation history + new query."""
+    history = conversation_histories.get(user_id, [])
+    # Append the new user message
+    history.append({"role": "user", "content": query})
+    # Build a single string prompt
+    lines = [PROMPT_INTRO]
+    for msg in history:
+        prefix = "User:" if msg["role"] == "user" else "Bot:"
+        lines.append(f"{prefix} {msg['content']}")
+    prompt = "\n".join(lines)
 
-        # Prepend prompt instructions
-        prompt_intro = (
-            "You are user's friend. Reply in friendly Hindi with emojis, "
-            "using 'bhai' style words like 'Arey bhai', 'Nahi bhai', etc.\n\n"
-        )
-        full_prompt = prompt_intro + query
+    # Call the API
+    resp = await api.chatgpt(prompt)
+    answer = resp.message or "Kuch toh gadbad hai, jawab nahin mila."
 
-        # Get response from SafoneAPI
-        response = await api.chatgpt(full_prompt)
-        if not response or not response.message:
-            raise ValueError("Invalid response from API")
+    # Append bot's answer to history
+    history.append({"role": "bot", "content": answer})
+    # Trim history if too long
+    if len(history) > MAX_HISTORY_PAIRS * 2:
+        history = history[-MAX_HISTORY_PAIRS * 2 :]
+    conversation_histories[user_id] = history
 
-        # Format and send final response
-        safe_answer = html.escape(response.message)
-        formatted = (
-            f"<b>Query:</b>\n~ <i>{html.escape(query)}</i>\n\n"
-            f"<b>ChatGPT:</b>\n~ <i>{safe_answer}</i>"
-        )
-        await status.edit_text(formatted)
+    return answer
 
-    except Exception as e:
-        logger.exception("Unexpected error")
-        await message.reply("🚨 Error: Safone API failed ya response nahi aaya.")
-
-# ─── /start COMMAND ────────────────────────────────────────────
+# ─── /start ───────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
     await message.answer(
-        "👋 Bhai, mujhe 'bhai &lt;sawal&gt;' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
+        "👋 Bhai, bas yahan message likho, main yaad rakhunga aur reply dunga!"
     )
 
-# ─── MAIN ENTRY POINT ──────────────────────────────────────────
+# ─── PRIVATE CHAT HANDLER ──────────────────────────────────────
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text)
+async def private_message_handler(message: types.Message):
+    status = await message.reply("🧠 Generating answer...")
+    try:
+        answer = await process_query(message.from_user.id, message.text)
+        safe = html.escape(answer)
+        await status.edit_text(safe)
+    except Exception:
+        logger.exception("Error in private_message_handler")
+        await status.edit_text("🚨 Koi internal error hua. Dobara try karo.")
+
+# ─── INLINE MODE HANDLER ───────────────────────────────────────
+@dp.inline_query()
+async def inline_query_handler(inline_q: types.InlineQuery):
+    query = inline_q.query.strip()
+    if not query:
+        return
+
+    try:
+        answer = await process_query(inline_q.from_user.id, query)
+        safe = html.escape(answer)
+        result = types.InlineQueryResultArticle(
+            id=str(uuid.uuid4()),
+            title="Bhai ka jawab",
+            input_message_content=types.InputTextMessageContent(
+                safe, parse_mode=ParseMode.HTML
+            ),
+            description=(safe[:50] + "...") if len(safe) > 50 else safe
+        )
+        await bot.answer_inline_query(
+            inline_q.id, results=[result], cache_time=0, is_personal=True
+        )
+    except Exception:
+        logger.exception("Error in inline_query_handler")
+        # Fail silently (no results)
+
+# ─── RUN BOT ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Bot is starting...")
+    logger.info("🚀 Bot is starting with inline & memory support...")
     dp.run_polling(bot)
+
 
