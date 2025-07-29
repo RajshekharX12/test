@@ -1,4 +1,2 @@
-# requirements.txt
-aiogram==3.4.1
-SafoneAPI==1.0.69
-python-dotenv==1.0.0
+aiogram==3.0.0b7
+httpx>=0.23.0
