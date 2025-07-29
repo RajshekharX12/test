@@ -64,9 +64,7 @@ async def keep_typing(chat_id: int, stop_event: asyncio.Event):
 # ─── /start HANDLER ────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer(
-        "👋 Bhai, bas yahan message likho, main yaad rakhunga aur reply dunga!"
-    )
+    await message.answer("👋 Bhai, bas yahan message likho, main yaad rakhunga aur reply dunga!")
 
 # ─── PRIVATE CHAT HANDLER ─────────────────────────────────────
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
@@ -100,11 +98,15 @@ async def inline_query_handler(inline_q: types.InlineQuery):
             title="Bhai ka jawab",
             description=(safe[:50] + "...") if len(safe) > 50 else safe,
             input_message_content=types.InputTextMessageContent(
-                safe, parse_mode=ParseMode.HTML
+                text=safe,
+                parse_mode=ParseMode.HTML
             ),
         )
         await bot.answer_inline_query(
-            inline_q.id, results=[result], cache_time=0, is_personal=True
+            inline_q.id,
+            results=[result],
+            cache_time=0,
+            is_personal=True
         )
     except Exception:
         logger.exception("Error in inline_query_handler")
@@ -114,5 +116,6 @@ async def inline_query_handler(inline_q: types.InlineQuery):
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting with typing indicators…")
     dp.run_polling(bot)
+
 
 
