@@ -18,17 +18,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 api = SafoneAPI()
 
-# ─── MEMORY CONFIG ─────────────────────────────────────────────
-conversation_histories: dict[int, list[dict[str, str]]] = {}
+# ─── MEMORY ────────────────────────────────────────────────────
+conversation_histories: dict[int, list[dict[str,str]]] = {}
 MAX_HISTORY = 20
-
 SYSTEM_PROMPT = (
     "You are Jarvis, a professional AI assistant. "
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
@@ -43,20 +42,21 @@ def normalize_num(token: str) -> str:
     return digits
 
 async def fetch_status(num: str) -> str:
-    url = f"https://fragment.com/number/{num}"
+    url = f"https://fragment.com/number/{num}/code"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(url)
-        content = r.text.lower()
-        if "restricted" in content:
+            resp = await client.get(url)
+        data = await resp.json()
+        st = data.get("status", "").lower()
+        if "restricted" in st:
             return "❌ Restricted"
-        if "anonymous number" in content:
+        if "anonymous" in st or "free" in st:
             return "✅ OK"
         return "❔ Unknown"
     except Exception:
         return "⚠️ Error"
 
-async def checknum_concurrent(nums: list[str]) -> list[tuple[str, str]]:
+async def checknum_concurrent(nums: list[str]) -> list[tuple[str,str]]:
     sem = asyncio.Semaphore(50)
     async def sem_check(n: str):
         async with sem:
@@ -66,7 +66,7 @@ async def checknum_concurrent(nums: list[str]) -> list[tuple[str, str]]:
 
 async def process_query(user_id: int, text: str) -> str:
     history = conversation_histories.setdefault(user_id, [])
-    history.append({"role": "user", "content": text})
+    history.append({"role":"user","content":text})
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
 
@@ -90,10 +90,18 @@ async def process_query(user_id: int, text: str) -> str:
             raise
 
     answer = resp.message or "I'm sorry, something went wrong."
-    history.append({"role": "bot", "content": answer})
+    history.append({"role":"bot","content":answer})
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
     return answer
+
+async def get_status_message() -> str:
+    prompt = (
+        "You are Jarvis, a witty AI assistant. "
+        "In one playful sentence, describe what you’re up to right now."
+    )
+    resp = await api.chatgpt(prompt)
+    return (resp.message or "Jarvis is working...").strip().strip('"')
 
 async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
     while not stop_evt.is_set():
@@ -104,7 +112,7 @@ async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Hello, Master! I'm Jarvis—send +888 numbers or ask any question, and I'll remember and reply."
+        "👋 Hello! I'm Jarvis—send +888 numbers to check which ones are restricted."
     )
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
@@ -114,58 +122,50 @@ async def dm_handler(message: types.Message):
     if not text:
         return
 
-    # Record user message
+    # record user
     history = conversation_histories.setdefault(user_id, [])
-    history.append({"role": "user", "content": text})
+    history.append({"role":"user","content":text})
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
 
-    # ─── +888 NUMBER DETECTION ───────────────────────────────
-    raw_tokens = re.split(r"[,\n]+", text)
-    nums: list[str] = []
-    for tok in raw_tokens:
+    # detect numbers
+    raw = re.split(r"[,\n]+", text)
+    nums = []
+    for tok in raw:
         tok = tok.strip()
-        # Try stripping spaces
         cand = re.sub(r"\s+", "", tok)
         if re.fullmatch(r"\+?\d{11,}", cand) and cand.lstrip("+").startswith("888"):
             nums.append(cand.lstrip("+"))
         else:
             cleaned = ""
-            for part in tok.split():
-                cleaned += re.sub(r"\D", "", part)
+            for p in tok.split():
+                cleaned += re.sub(r"\D", "", p)
                 if len(cleaned) >= 11:
                     break
             if len(cleaned) >= 11 and cleaned.startswith("888"):
                 nums.append(cleaned)
-
-    # Dedupe preserving order
     seen = set()
     nums = [n for n in nums if not (n in seen or seen.add(n))]
 
     if nums:
-        count = len(nums)
-        header = f"🔍 Checking *{count}* number{'s' if count>1 else ''}…"
-        status = await message.reply(header, parse_mode=ParseMode.MARKDOWN)
-
+        status_text = await get_status_message()
+        status = await message.reply(status_text)
         stop_evt = asyncio.Event()
         typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
         try:
             results = await checknum_concurrent(nums)
-            asc = sorted(results, key=lambda x: int(x[0]))
-            desc = list(reversed(asc))
+            restricted = [n for n,s in results if s=="❌ Restricted"]
+            if restricted:
+                reply = "🔴 Restricted numbers:\n" + "\n".join(restricted)
+            else:
+                reply = "✅ No restricted numbers found."
 
-            # Build lines
-            lines = ["🔢 *Ascending Order:*"] + [f"{n}: {s}" for n, s in asc]
-            lines += [""] + ["🔢 *Descending Order:*"] + [f"{n}: {s}" for n, s in desc]
+            # send in chunks if needed
+            lines = reply.split("\n")
+            for i in range(0, len(lines), 40):
+                await message.reply("\n".join(lines[i:i+40]), parse_mode=ParseMode.MARKDOWN)
 
-            # Split into chunks of 40 lines each
-            chunk_size = 40
-            for i in range(0, len(lines), chunk_size):
-                await message.reply("\n".join(lines[i : i + chunk_size]))
-
-            # Record bot reply
-            reply_text = "\n".join(lines)
-            history.append({"role": "bot", "content": reply_text})
+            history.append({"role":"bot","content":reply})
             if len(history) > MAX_HISTORY:
                 del history[:-MAX_HISTORY]
 
@@ -175,14 +175,15 @@ async def dm_handler(message: types.Message):
             await typer
         return
 
-    # ─── FREE-FORM CHATGPT FALLBACK ────────────────────────────
-    status = await message.reply("🧠 Thinking…")
+    # fallback to chatgpt
+    status_text = await get_status_message()
+    status = await message.reply(status_text)
     stop_evt = asyncio.Event()
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
     try:
         answer = await process_query(user_id, text)
         await status.edit_text(answer, parse_mode=None)
-        history.append({"role": "bot", "content": answer})
+        history.append({"role":"bot","content":answer})
         if len(history) > MAX_HISTORY:
             del history[:-MAX_HISTORY]
     finally:
@@ -191,5 +192,4 @@ async def dm_handler(message: types.Message):
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Jarvis is starting with line‑chunking enabled…")
     dp.run_polling(bot)
