@@ -50,10 +50,10 @@ async def chatgpt_handler(message: types.Message):
             "dialog_messages": [{"bot": "", "user": ""}]
         }
 
-        # Safone API request
+        # Safone API request (✅ UPDATED URL)
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://api.safone.dev/chatgpt",
+                "https://api.safone.co/chatgpt",
                 json=payload,
                 headers={"Content-Type": "application/json"},
             )
@@ -92,7 +92,4 @@ async def start(message: types.Message):
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting...")
     dp.run_polling(bot)
-
-
-
 
