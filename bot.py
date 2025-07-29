@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-# ─── HANDLER ───────────────────────────────────────────────────
+# ─── BHAAI HANDLER ─────────────────────────────────────────────
 @dp.message(F.text.startswith("bhai"))
 async def chatgpt_handler(message: types.Message):
     try:
@@ -47,7 +47,7 @@ async def chatgpt_handler(message: types.Message):
         payload = {
             "message": prompt_intro + html.escape(query),
             "chat_mode": "assistant",
-            "dialog_messages": [{"bot": "", "user": ""}]  # correctly passed as a list
+            "dialog_messages": [{"bot": "", "user": ""}]
         }
 
         # Safone API request
@@ -81,15 +81,18 @@ async def chatgpt_handler(message: types.Message):
         logger.exception("Unexpected error")
         await message.reply("🚨 Internal Error occurred. Try again later.")
 
-# ─── COMMAND START (Optional) ─────────────────────────────
+# ─── COMMAND /start ────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("👋 Bhai, mujhe 'bhai <sawal>' likh kar puchho. Main Hindi mein dost jaisa reply dunga!")
+    await message.answer(
+        "👋 Bhai, mujhe 'bhai &lt;sawal&gt;' likh kar puchho. Main Hindi mein dost jaisa reply dunga!"
+    )
 
-# ─── MAIN ─────────────────────────────────────────────────
+# ─── MAIN ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("🚀 Bot is starting...")
     dp.run_polling(bot)
+
 
 
 
