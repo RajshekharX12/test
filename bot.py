@@ -18,10 +18,7 @@ if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
 # ─── LOGGING ──────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # ─── BOT & API SETUP ──────────────────────────────────────────
@@ -29,34 +26,42 @@ bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 api = SafoneAPI()
 
-# ─── CONVERSATION MEMORY ──────────────────────────────────────
+# ─── GLOBAL STATE ─────────────────────────────────────────────
+BOT_USERNAME: str = ""
 conversation_histories: dict[int, list[dict[str, str]]] = {}
 MAX_HISTORY_PAIRS = 10
 
-# ─── JARVIS SYSTEM PROMPT ─────────────────────────────────────
+# ─── JARVIS PROMPT INTRO ──────────────────────────────────────
 PROMPT_INTRO = (
     "You are Jarvis, a professional AI assistant. "
     "The user is your master. You help with tasks—especially managing +888 rental numbers—"
     "and speak respectfully and concisely.\n\n"
 )
 
+# ─── ON STARTUP: FETCH BOT USERNAME ────────────────────────────
+async def on_startup():
+    global BOT_USERNAME
+    me = await bot.get_me()
+    BOT_USERNAME = me.username or ""
+    logger.info(f"🤖 Bot username: @{BOT_USERNAME}")
+
+# ─── PROCESS QUERY & MEMORY ────────────────────────────────────
 async def process_query(user_id: int, query: str) -> str:
-    """Build prompt from history + new query, call SafoneAPI, update memory, return answer."""
     history = conversation_histories.get(user_id, [])
     history.append({"role": "user", "content": query})
 
-    # Compose the full prompt
+    # build prompt
     lines = [PROMPT_INTRO] + [
         f"{'Master:' if msg['role']=='user' else 'Jarvis:'} {msg['content']}"
         for msg in history
     ]
     prompt = "\n".join(lines)
 
-    # Call SafoneAPI
+    # call API
     resp = await api.chatgpt(prompt)
     answer = resp.message or "I apologize, Master—something went wrong."
 
-    # Update history
+    # update history
     history.append({"role": "bot", "content": answer})
     if len(history) > MAX_HISTORY_PAIRS * 2:
         del history[:-MAX_HISTORY_PAIRS * 2]
@@ -64,77 +69,108 @@ async def process_query(user_id: int, query: str) -> str:
 
     return answer
 
+# ─── TYPING INDICATOR ─────────────────────────────────────────
 async def keep_typing(chat_id: int, stop_event: asyncio.Event):
-    """Send ChatAction.TYPING every few seconds until stopped."""
     while not stop_event.is_set():
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
         await asyncio.sleep(4)
 
-# ─── /start COMMAND ────────────────────────────────────────────
+# ─── /start ────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Greetings, Master. I am Jarvis. "
-        "Just type your question here, and I’ll respond—no slash or keyword needed."
+        "Type here in DMs or mention me in groups—I'll reply contextually."
     )
 
-# ─── PRIVATE CHAT HANDLER ─────────────────────────────────────
+# ─── PRIVATE DM HANDLER ────────────────────────────────────────
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
 async def private_handler(message: types.Message):
     query = message.text.strip()
     if not query:
         return
 
-    stop_event = asyncio.Event()
-    typer = asyncio.create_task(keep_typing(message.chat.id, stop_event))
-
+    stop = asyncio.Event()
+    task = asyncio.create_task(keep_typing(message.chat.id, stop))
     try:
         status = await message.reply("🧠 Jarvis is thinking...")
         answer = await process_query(message.from_user.id, query)
         await status.edit_text(html.escape(answer))
-    except Exception:
-        logger.exception("Error in private_handler")
-        await status.edit_text("🚨 My apologies, Master—an internal error occurred.")
     finally:
-        stop_event.set()
-        await typer
+        stop.set()
+        await task
 
-# ─── INLINE QUERY HANDLER ─────────────────────────────────────
+# ─── GROUP MENTION HANDLER ────────────────────────────────────
+@dp.message(
+    F.chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP]),
+    F.text.startswith(lambda _: f"@{BOT_USERNAME}")
+)
+async def group_handler(message: types.Message):
+    parts = message.text.split(maxsplit=1)
+    query = parts[1] if len(parts) > 1 else ""
+    if not query:
+        return
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(keep_typing(message.chat.id, stop))
+    try:
+        status = await message.reply("🧠 Jarvis is thinking...")
+        answer = await process_query(message.from_user.id, query)
+        await status.edit_text(html.escape(answer))
+    finally:
+        stop.set()
+        await task
+
+# ─── INLINE QUERY HANDLER (FAST & SAFE) ───────────────────────
 @dp.inline_query()
 async def inline_handler(inline_q: types.InlineQuery):
+    user_id = inline_q.from_user.id
     query = inline_q.query.strip()
     if not query:
         return
 
-    try:
-        # Fetch the full answer (must complete within ~5s)
-        answer = await process_query(inline_q.from_user.id, query)
-        safe = html.escape(answer)
-        snippet = (safe[:100] + "...") if len(safe) > 100 else safe
+    results: list[types.InlineQueryResultArticle] = []
 
-        result = types.InlineQueryResultArticle(
-            id=str(uuid.uuid4()),
-            title="Jarvis replies:",
-            description=snippet,  # preview snippet
+    # 1) Check memory for a cached answer
+    history = conversation_histories.get(user_id, [])
+    snippet = None
+    for i in range(len(history) - 1):
+        if history[i]["role"] == "user" and history[i]["content"] == query:
+            snippet = history[i + 1]["content"]
+            break
+
+    if snippet:
+        safe = html.escape(snippet)
+        desc = (safe[:100] + "...") if len(safe) > 100 else safe
+        results.append(types.InlineQueryResultArticle(
+            id="cached",
+            title="Cached answer",
+            description=desc,
             input_message_content=types.InputTextMessageContent(
-                message_text=safe,  # full answer on tap
+                message_text=safe,
                 parse_mode=ParseMode.HTML
             ),
-        )
-        await bot.answer_inline_query(
-            inline_q.id,
-            results=[result],
-            cache_time=0,
-            is_personal=True
-        )
-    except Exception:
-        logger.exception("Error in inline_handler")
-        # fail silently to avoid bad_request
+        ))
+    else:
+        # 2) No cache → redirect to DM for live answer
+        results.append(types.InlineQueryResultArticle(
+            id="to_dm",
+            title="Ask Jarvis in DM",
+            description="No preview available—tap to ask in private chat",
+            input_message_content=types.InputTextMessageContent(
+                message_text=query
+            ),
+            switch_pm_text="Ask Jarvis",
+            switch_pm_parameter="start"
+        ))
+
+    await bot.answer_inline_query(
+        inline_q.id,
+        results=results,
+        cache_time=60,
+        is_personal=True
+    )
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Jarvis is starting…")
-    dp.run_polling(bot)
-
-
-
+    dp.run_polling(bot, on_startup=[on_startup])
