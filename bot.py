@@ -1,8 +1,9 @@
 import os
+import re
 import html
-import uuid
 import logging
 import asyncio
+import httpx
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
@@ -11,152 +12,156 @@ from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from dotenv import load_dotenv
 
-# ─── LOAD ENV ─────────────────────────────────────────────────
+# ─── CONFIG ────────────────────────────────────────────────────
 load_dotenv()
-API_TOKEN = os.getenv("BOT_TOKEN")
-if not API_TOKEN:
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# ─── LOGGING ──────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ─── BOT & API SETUP ──────────────────────────────────────────
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 api = SafoneAPI()
 
-# ─── STATE & MEMORY ───────────────────────────────────────────
-BOT_USERNAME = ""
+# ─── MEMORY ────────────────────────────────────────────────────
+# conversation_histories[user_id] = [ {"role":"user"|"bot","content":str}, ... ]
 conversation_histories: dict[int, list[dict[str,str]]] = {}
-MAX_HISTORY_PAIRS = 10
+MAX_HISTORY = 20  # total messages (user+bot) to remember per user
 
-PROMPT_INTRO = (
+SYSTEM_PROMPT = (
     "You are Jarvis, a professional AI assistant. "
-    "The user is your master. You help with tasks—especially managing +888 rental numbers—"
-    "and speak respectfully and concisely.\n\n"
+    "The user is your master. Respond helpfully in friendly Hindi or English with emojis.\n\n"
 )
 
-async def on_startup():
-    global BOT_USERNAME
-    me = await bot.get_me()
-    BOT_USERNAME = me.username or ""
-    logger.info(f"🤖 Bot username: @{BOT_USERNAME}")
+# ─── HELPERS ───────────────────────────────────────────────────
+def normalize_num(token: str) -> str:
+    digits = re.sub(r"\D", "", token)
+    if not digits.startswith("888"):
+        digits = digits.lstrip("0")
+        digits = "888" + digits
+    return digits
 
-async def process_query(user_id: int, query: str) -> str:
-    hist = conversation_histories.get(user_id, [])
-    hist.append({"role":"user","content":query})
-    lines = [PROMPT_INTRO] + [
+async def fetch_status(num: str) -> str:
+    url = f"https://fragment.com/number/{num}/code"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url)
+        txt = r.text.lower()
+        if "restricted on telegram" in txt:
+            return "❌ Restricted"
+        if "anonymous number" in txt or "free" in txt:
+            return "✅ OK"
+        return "❔ Unknown"
+    except Exception:
+        return "⚠️ Error"
+
+async def checknum_concurrent(nums: list[str]) -> list[tuple[str,str]]:
+    sem = asyncio.Semaphore(50)  # up to 50 parallel requests
+    async def sem_check(n: str):
+        async with sem:
+            return n, await fetch_status(n)
+    normalized = [normalize_num(n) for n in nums]
+    return await asyncio.gather(*(sem_check(n) for n in normalized))
+
+async def process_query(user_id: int, text: str) -> str:
+    """Append to memory, build prompt from memory + text, call ChatGPT, update memory."""
+    history = conversation_histories.setdefault(user_id, [])
+    history.append({"role":"user","content":text})
+
+    # build prompt
+    prompt = SYSTEM_PROMPT + "\n".join(
         f"{'Master:' if m['role']=='user' else 'Jarvis:'} {m['content']}"
-        for m in hist
-    ]
-    prompt = "\n".join(lines)
+        for m in history
+    )
+
     resp = await api.chatgpt(prompt)
-    ans = resp.message or "I apologize, Master—something went wrong."
-    hist.append({"role":"bot","content":ans})
-    if len(hist) > MAX_HISTORY_PAIRS*2:
-        del hist[:-MAX_HISTORY_PAIRS*2]
-    conversation_histories[user_id] = hist
-    return ans
+    answer = resp.message or "Maaf kijiye, Master—kuch galat ho gaya."
+
+    history.append({"role":"bot","content":answer})
+    # trim oldest if too long
+    if len(history) > MAX_HISTORY:
+        del history[:-MAX_HISTORY]
+    return answer
 
 async def keep_typing(chat_id: int, stop_evt: asyncio.Event):
+    """Send typing indicator until stop_evt is set."""
     while not stop_evt.is_set():
         await bot.send_chat_action(chat_id, ChatAction.TYPING)
         await asyncio.sleep(4)
 
-# ─── /start ────────────────────────────────────────────────────
-@dp.message(CommandStart())
-async def cmd_start(msg: types.Message):
-    await msg.answer(
-        "👋 Greetings, Master. I am Jarvis. "
-        "Type here in DMs or mention me in groups—I'll reply contextually."
+# ─── HANDLERS ──────────────────────────────────────────────────
+@dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
+async def cmd_start(message: types.Message):
+    welcome = (
+        "👋 नमस्ते, Master! मैं Jarvis हूँ—बस +888 नंबर भेजें "
+        "या कोई भी सवाल टाइप करें, मैं याद रखूँगा और जवाब दूँगा।"
     )
+    await message.answer(welcome)
 
-# ─── PRIVATE DM HANDLER ────────────────────────────────────────
-@dp.message(F.chat.type==ChatType.PRIVATE, F.text)
-async def private_handler(msg: types.Message):
-    q = msg.text.strip()
-    if not q: return
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text)
+async def dm_handler(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    if not text:
+        return
 
-    stop = asyncio.Event()
-    task = asyncio.create_task(keep_typing(msg.chat.id, stop))
+    # Record the user's message in memory
+    conversation_histories.setdefault(user_id, []).append({"role":"user","content":text})
+    # Trim
+    if len(conversation_histories[user_id]) > MAX_HISTORY:
+        del conversation_histories[user_id][:-MAX_HISTORY]
 
+    # Number-check branch
+    tokens = re.split(r"[,\s]+", text)
+    nums = [t for t in tokens if re.fullmatch(r"\+?\d+", t)]
+    if nums:
+        count = len(nums)
+        header = f"🔍 Checking *{count}* number{'s' if count>1 else ''}…"
+        status = await message.reply(header)
+
+        stop_evt = asyncio.Event()
+        typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
+        try:
+            results = await checknum_concurrent(nums)
+            asc = sorted(results, key=lambda x: int(x[0]))
+            desc = list(reversed(asc))
+
+            # Build response text
+            asc_lines = ["🔢 *Ascending Order:*"] + [f"{n}: {s}" for n,s in asc]
+            desc_lines = ["🔢 *Descending Order:*"] + [f"{n}: {s}" for n,s in desc]
+            full_reply = "\n".join(asc_lines + [""] + desc_lines)
+
+            # Send reply
+            await message.reply(full_reply)
+
+            # Record Jarvis’s reply in memory
+            conversation_histories[user_id].append({"role":"bot","content":full_reply})
+            if len(conversation_histories[user_id]) > MAX_HISTORY:
+                del conversation_histories[user_id][:-MAX_HISTORY]
+
+            # clean up header
+            await status.delete()
+        finally:
+            stop_evt.set()
+            await typer
+        return
+
+    # Free-form ChatGPT branch
+    status = await message.reply("🧠 सोच रहा हूँ…")
+    stop_evt = asyncio.Event()
+    typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
     try:
-        status = await msg.reply("🧠 Jarvis is thinking...")
-        ans = await process_query(msg.from_user.id, q)
-        await status.edit_text(html.escape(ans))
-    except Exception:
-        logger.exception("private_handler")
-        await status.edit_text("🚨 My apologies, Master—an internal error occurred.")
+        answer = await process_query(user_id, text)
+        # Update the last bot entry in memory (already done in process_query)
+        await status.edit_text(html.escape(answer), parse_mode=None)
     finally:
-        stop.set()
-        await task
-
-# ─── GROUP MENTION HANDLER ────────────────────────────────────
-@dp.message(
-    F.chat.type.in_([ChatType.GROUP,ChatType.SUPERGROUP]),
-    F.text.startswith(lambda _: f"@{BOT_USERNAME}")
-)
-async def group_handler(msg: types.Message):
-    parts = msg.text.split(maxsplit=1)
-    q = parts[1] if len(parts)>1 else ""
-    if not q: return
-
-    stop = asyncio.Event()
-    task = asyncio.create_task(keep_typing(msg.chat.id, stop))
-    try:
-        st = await msg.reply("🧠 Jarvis is thinking...")
-        ans = await process_query(msg.from_user.id, q)
-        await st.edit_text(html.escape(ans))
-    finally:
-        stop.set()
-        await task
-
-# ─── INLINE QUERY HANDLER (5s TIMEOUT SAFE) ───────────────────
-@dp.inline_query()
-async def inline_handler(iq: types.InlineQuery):
-    user = iq.from_user.id
-    q = iq.query.strip()
-    if not q: return
-
-    results: list[types.InlineQueryResultArticle] = []
-    try:
-        # Wait up to 4 seconds for a live answer
-        ans = await asyncio.wait_for(process_query(user, q), timeout=4)
-        safe = html.escape(ans)
-        snippet = (safe[:100]+"...") if len(safe)>100 else safe
-        results.append(types.InlineQueryResultArticle(
-            id="live",
-            title="Jarvis replies:",
-            description=snippet,
-            input_message_content=types.InputTextMessageContent(
-                message_text=safe,
-                parse_mode=ParseMode.HTML
-            )
-        ))
-    except asyncio.TimeoutError:
-        # Fallback: prompt user to switch to private chat
-        results.append(types.InlineQueryResultArticle(
-            id="dm",
-            title="Ask Jarvis in DM",
-            description="Preview unavailable—tap to ask privately",
-            input_message_content=types.InputTextMessageContent(
-                message_text=q
-            ),
-            switch_pm_text="Ask Jarvis",
-            switch_pm_parameter="start"
-        ))
-    except Exception:
-        logger.exception("inline_handler")
-        # silent fail
-
-    await bot.answer_inline_query(
-        iq.id,
-        results=results,
-        cache_time=0,
-        is_personal=True
-    )
+        stop_evt.set()
+        await typer
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    dp.run_polling(bot, on_startup=[on_startup])
+    logger.info("🚀 Jarvis is starting with memory & on-demand checks…")
+    dp.run_polling(bot)
+
