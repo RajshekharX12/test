@@ -5,8 +5,7 @@ import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
--from aiogram.types import ChatActions
-+from aiogram.enums.chat_action import ChatAction  # :contentReference[oaicite:1]{index=1}
+from aiogram.enums.chat_action import ChatAction
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from dotenv import load_dotenv
@@ -59,13 +58,15 @@ async def process_query(user_id: int, query: str) -> str:
 async def keep_typing(chat_id: int, stop_event: asyncio.Event):
     """Keep sending ChatAction.TYPING until stop_event is set."""
     while not stop_event.is_set():
-        await bot.send_chat_action(chat_id, ChatAction.TYPING)  # :contentReference[oaicite:2]{index=2}
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
         await asyncio.sleep(4)
 
 # ─── /start HANDLER ────────────────────────────────────────────
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("👋 Bhai, bas yahan message likho, main yaad rakhunga aur reply dunga!")
+    await message.answer(
+        "👋 Bhai, bas yahan message likho, main yaad rakhunga aur reply dunga!"
+    )
 
 # ─── PRIVATE CHAT HANDLER ─────────────────────────────────────
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
