@@ -27,7 +27,7 @@ api = SafoneAPI()
 
 # ─── MEMORY CONFIG ─────────────────────────────────────────────
 conversation_histories: dict[int, list[dict[str, str]]] = {}
-MAX_HISTORY = 20  # keep the last 20 messages per user
+MAX_HISTORY = 20
 
 SYSTEM_PROMPT = (
     "You are Jarvis, a professional AI assistant. "
@@ -90,7 +90,6 @@ async def process_query(user_id: int, text: str) -> str:
             raise
 
     answer = resp.message or "I'm sorry, something went wrong."
-
     history.append({"role": "bot", "content": answer})
     if len(history) > MAX_HISTORY:
         del history[:-MAX_HISTORY]
@@ -126,6 +125,7 @@ async def dm_handler(message: types.Message):
     nums: list[str] = []
     for tok in raw_tokens:
         tok = tok.strip()
+        # Try stripping spaces
         cand = re.sub(r"\s+", "", tok)
         if re.fullmatch(r"\+?\d{11,}", cand) and cand.lstrip("+").startswith("888"):
             nums.append(cand.lstrip("+"))
@@ -138,7 +138,7 @@ async def dm_handler(message: types.Message):
             if len(cleaned) >= 11 and cleaned.startswith("888"):
                 nums.append(cleaned)
 
-    # Deduplicate, preserve order
+    # Dedupe preserving order
     seen = set()
     nums = [n for n in nums if not (n in seen or seen.add(n))]
 
@@ -154,14 +154,18 @@ async def dm_handler(message: types.Message):
             asc = sorted(results, key=lambda x: int(x[0]))
             desc = list(reversed(asc))
 
-            asc_lines = ["🔢 *Ascending Order:*"] + [f"{n}: {s}" for n, s in asc]
-            desc_lines = ["🔢 *Descending Order:*"] + [f"{n}: {s}" for n, s in desc]
-            full_reply = "\n".join(asc_lines + [""] + desc_lines)
+            # Build lines
+            lines = ["🔢 *Ascending Order:*"] + [f"{n}: {s}" for n, s in asc]
+            lines += [""] + ["🔢 *Descending Order:*"] + [f"{n}: {s}" for n, s in desc]
 
-            await message.reply(full_reply)
+            # Split into chunks of 40 lines each
+            chunk_size = 40
+            for i in range(0, len(lines), chunk_size):
+                await message.reply("\n".join(lines[i : i + chunk_size]))
 
             # Record bot reply
-            history.append({"role": "bot", "content": full_reply})
+            reply_text = "\n".join(lines)
+            history.append({"role": "bot", "content": reply_text})
             if len(history) > MAX_HISTORY:
                 del history[:-MAX_HISTORY]
 
@@ -177,10 +181,7 @@ async def dm_handler(message: types.Message):
     typer = asyncio.create_task(keep_typing(message.chat.id, stop_evt))
     try:
         answer = await process_query(user_id, text)
-
-        # No html.escape here, so apostrophes remain as `'`
         await status.edit_text(answer, parse_mode=None)
-
         history.append({"role": "bot", "content": answer})
         if len(history) > MAX_HISTORY:
             del history[:-MAX_HISTORY]
@@ -190,6 +191,5 @@ async def dm_handler(message: types.Message):
 
 # ─── MAIN ─────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("🚀 Jarvis is starting—no more HTML entities in replies.")
+    logger.info("🚀 Jarvis is starting with line‑chunking enabled…")
     dp.run_polling(bot)
-
