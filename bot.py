@@ -160,7 +160,8 @@ async def chat_handler(msg: types.Message) -> None:
     start = perf_counter()
     reply = await process_query(msg.from_user.id, msg.text.strip())
     elapsed = perf_counter() - start
-    await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s}")
+    await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
+
 
 # ─── PLUGINS ────────────────────────────────────────────────────
 import fragment_url    # inline +888 URL
