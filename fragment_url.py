@@ -2,16 +2,18 @@
 """
 fragment_url.py
 
-• Inline handler for 888‑prefixed URL generation.
+Inline handler for 888‑prefixed URL generation.
 """
 
-import re
-import uuid
+import sys, re, uuid
 from typing import Final
-
-from aiogram import types, F
+from aiogram import F
 from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
-from bot import dp, bot
+
+# grab the running bot & dp out of __main__
+_main = sys.modules["__main__"]
+dp   = _main.dp
+bot  = _main.bot
 
 BASE_URL: Final[str] = "https://fragment.com/number/{number}/code"
 
@@ -24,7 +26,7 @@ def format_fragment_url(raw: str) -> str:
     return BASE_URL.format(number=num)
 
 @dp.inline_query(F.query)
-async def inline_fragment_handler(inline_q: types.InlineQuery) -> None:
+async def inline_fragment_handler(inline_q):
     cleaned = re.sub(r"\D", "", inline_q.query)
     if not cleaned:
         return await bot.answer_inline_query(inline_q.id, results=[], cache_time=0)
@@ -35,7 +37,7 @@ async def inline_fragment_handler(inline_q: types.InlineQuery) -> None:
 
     article = InlineQueryResultArticle(
         id=str(uuid.uuid4()),
-        title="Fragment check URL",
+        title="Fragment check URL",
         description=url,
         input_message_content=InputTextMessageContent(message_text=url)
     )
