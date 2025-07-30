@@ -2,23 +2,20 @@
 """
 logs_utils.py
 
-“Jarvis logs” DM handler.
+“Jarvis logs” DM handler – Top 5 error summary.
 """
 
 import sys
 from pathlib import Path
+from collections import Counter
 from aiogram import F
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ChatType
 
-# grab the running dp out of __main__
+# pull in the real dp
 _main = sys.modules["__main__"]
 dp   = _main.dp
 
-LOG_FILE = Path("bot.log")
-
-def get_chunks(path: Path, size: int = 4000):
-    text = path.read_text() if path.exists() else ""
-    return [text[i : i + size] for i in range(0, len(text), size)]
+LOG_FILE = Path(__file__).parent / "bot.log"
 
 @dp.message(
     F.chat.type == ChatType.PRIVATE,
@@ -27,8 +24,22 @@ def get_chunks(path: Path, size: int = 4000):
 async def logs_handler(msg):
     if not LOG_FILE.exists():
         return await msg.reply("⚠️ bot.log not found.")
-    chunks = get_chunks(LOG_FILE)
-    if not chunks:
-        return await msg.reply("⚠️ bot.log is empty.")
-    for c in chunks:
-        await msg.reply(f"```{c}```", parse_mode=ParseMode.MARKDOWN)
+    lines = LOG_FILE.read_text().splitlines()
+
+    # gather only lines marked ERROR
+    errs = []
+    for l in lines:
+        if " ERROR " in l:
+            parts = l.split(" ", 2)
+            errs.append(parts[2] if len(parts)==3 else l)
+
+    if not errs:
+        return await msg.reply("✅ No ERROR entries in log.")
+
+    cnt = Counter(errs)
+    top5 = cnt.most_common(5)
+    text = "🔍 Top 5 Errors:\n"
+    for i,(m,n) in enumerate(top5,1):
+        text += f"{i}. {m} — {n} time{'s' if n>1 else ''}\n"
+
+    await msg.reply(text)
