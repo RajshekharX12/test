@@ -107,8 +107,18 @@ dp  = Dispatcher()
 async def cmd_start(msg: types.Message) -> None:
     await msg.answer("👋 Greetings, Master! Jarvis is online — just say anything.")
 
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
+@dp.message(
+    F.chat.type == ChatType.PRIVATE,
+    F.text.regexp(r"(?i)^jarvis restart$")
+)
 async def restart_handler(msg: types.Message) -> None:
+    """
+    1) git pull
+    2) pip install -r requirements.txt
+    3) pip install --upgrade safoneapi
+    4) show diff‑stat + snippet
+    5) hot‑restart
+    """
     await msg.reply("🔄 Pulling latest code from Git, Master…")
     cwd = os.path.dirname(__file__)
     await msg.reply(f"📂 Working dir: `{cwd}`")
@@ -119,20 +129,20 @@ async def restart_handler(msg: types.Message) -> None:
             stdin=subprocess.DEVNULL, timeout=timeout
         )
 
-    # 1) git pull
+    # Git pull
     pull = run(["git","pull"])
     if pull.returncode != 0:
         return await msg.reply(f"❌ Git pull failed:\n```{pull.stderr}```")
     await msg.reply(f"✅ Git pull done:\n```{pull.stdout}```")
 
-    # 2) install requirements
+    # Install requirements
     await msg.reply("🔧 Installing dependencies…")
     deps = run(["pip3","install","-r","requirements.txt"])
     if deps.returncode != 0:
         return await msg.reply(f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```")
     await msg.reply("✅ Dependencies installed/updated.")
 
-    # 3) upgrade safoneapi
+    # Upgrade safoneapi
     await msg.reply("⬆️ Upgrading safoneapi…")
     sa_up = run(["pip3","install","--upgrade","safoneapi"])
     if sa_up.returncode != 0:
@@ -140,7 +150,7 @@ async def restart_handler(msg: types.Message) -> None:
     else:
         await msg.reply("✅ safoneapi is up to date.")
 
-    # 4) diff‑stat & snippet
+    # Diff‑stat & snippet
     old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
     new = run(["git","rev-parse","HEAD"]).stdout.strip()
     stat = run(["git","diff","--stat", old, new]).stdout.strip() or "✅ No changes"
@@ -153,23 +163,34 @@ async def restart_handler(msg: types.Message) -> None:
         if len(diff_full) > len(snippet):
             await msg.reply("…and more lines omitted.")
 
-    # 5) hot‑restart
+    # Hot‑restart
     await asyncio.sleep(1)
     await msg.reply("🔄 Restarting now, Master…")
     await shutdown()
     do_restart()
 
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text)
+# ─── CHAT HANDLER ────────────────────────────────────────────────
+@dp.message(
+    F.chat.type == ChatType.PRIVATE,
+    F.text,
+    # exclude our special commands so they go to their own handlers
+    ~F.text.regexp(r"(?i)^(jarvis restart|jarvis logs)$")
+)
 async def chat_handler(msg: types.Message) -> None:
+    """
+    Catch‑all private‑chat handler for everything except
+    'jarvis restart' and 'jarvis logs'.
+    Sends your message + short history to ChatGPT and replies.
+    """
     start = perf_counter()
     reply = await process_query(msg.from_user.id, msg.text.strip())
     elapsed = perf_counter() - start
     await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
 
 # ─── PLUGIN IMPORTS ───────────────────────────────────────────────
-# The next two imports register inline‑ and log‑handlers automatically:
-import fragment_url
-import logs_utils
+# these must come after dp & bot are defined
+import fragment_url    # registers the inline‑number handler
+import logs_utils      # registers the “Jarvis logs” handler
 
 # ─── MAIN ─────────────────────────────────────────────────────────
 async def main() -> None:
@@ -188,4 +209,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
-
