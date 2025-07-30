@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-Jarvis v1.0.69 — ChatGPT-only core + robust “Jarvis restart” handler
+Jarvis v1.0.70 — ChatGPT-only core + full “Jarvis restart” self‑update
 
 Features:
- • All private text messages go to api.chatgpt(prompt) (catch-all)
- • “/start” greeting, then just type anything
- • “Jarvis restart” → non-interactive git pull, shows stats/diff, hot-restarts
+ • Catch‑all private‑chat handler → api.chatgpt(prompt)
+ • “/start” greeting, otherwise just type anything
+ • “Jarvis restart” does:
+     1) git pull
+     2) pip install -r requirements.txt
+     3) pip install --upgrade safoneapi
+     4) show diff‑stat + snippet
+     5) hot‑restart via os.execv
  • Response time appended to every reply
 
 Usage:
- 1. Create a `.env` file in this directory with:
-      BOT_TOKEN=<your_telegram_bot_token>
- 2. Install dependencies:
-      pip install aiogram==3.4.1 safoneapi==1.0.69 python-dotenv httpx tgcrypto
- 3. Run inside your project folder:
+ 1. Create a `.env` alongside this file:
+      BOT_TOKEN=<your_bot_token>
+ 2. Create a `requirements.txt` listing your deps.
+ 3. Install deps:
+      pip install -r requirements.txt safoneapi==1.0.69
+ 4. Launch in your repo folder:
       screen -S jarvis python3 bot.py
 """
 
@@ -58,8 +64,7 @@ async def shutdown() -> None:
 
 def do_restart() -> None:
     """Re-executes this script in-place (hot-restart)."""
-    python = sys.executable
-    os.execv(python, [python] + sys.argv)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 # ─── MEMORY & RATE LIMIT ─────────────────────────────────────────
 MAX_HISTORY = 6
@@ -86,10 +91,8 @@ async def process_query(user_id: int, text: str) -> str:
     except safone_errors.GenericApiError as e:
         if "reduce the context" in str(e).lower() and hist:
             last_msg = hist[-1]
-            hist.clear()
-            hist.append(last_msg)
-            retry = f"User: {last_msg['content']}\nJarvis:"
-            resp = await api.chatgpt(retry)
+            hist.clear(); hist.append(last_msg)
+            resp = await api.chatgpt(f"User: {last_msg['content']}\nJarvis:")
         else:
             logger.error(f"ChatGPT API error: {e}")
             return "🚨 AI service error, please try again later."
@@ -115,61 +118,61 @@ async def cmd_start(msg: types.Message) -> None:
 )
 async def restart_handler(msg: types.Message) -> None:
     """
-    Non-interactive git pull, diff-stat, and hot-restart.
+    1) git pull
+    2) pip install -r requirements.txt
+    3) pip install --upgrade safoneapi
+    4) show diff-stat + snippet
+    5) hot-restart
     """
     await msg.reply("🔄 Pulling latest code from Git, Master…")
-
     cwd = os.path.dirname(__file__)
     await msg.reply(f"📂 Working dir: `{cwd}`")
 
-    def run(cmd):
+    def run(cmd, timeout=120):
         return subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
-            timeout=30
+            timeout=timeout
         )
 
-    # 1) old HEAD
-    try:
-        old = run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    except Exception as e:
-        return await msg.reply(f"❌ Could not read old HEAD: {e}")
+    # git pull
+    pull = run(["git","pull"])
+    if pull.returncode != 0:
+        return await msg.reply(f"❌ Git pull failed:\n```{pull.stderr.strip()}```")
+    await msg.reply(f"✅ Git pull done:\n```{pull.stdout.strip()}```")
 
-    # 2) git pull
-    try:
-        pull = run(["git", "pull"])
-        out, err = pull.stdout.strip(), pull.stderr.strip()
-    except subprocess.TimeoutExpired:
-        return await msg.reply("⚠️ `git pull` timed out after 30s.")
-    except Exception as e:
-        return await msg.reply(f"❌ `git pull` failed: {e}")
+    # install requirements
+    await msg.reply("🔧 Installing dependencies…")
+    deps = run(["pip3","install","-r","requirements.txt"])
+    if deps.returncode != 0:
+        return await msg.reply(f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```")
+    await msg.reply("✅ Dependencies installed/updated.")
 
-    # 3) new HEAD
-    try:
-        new = run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    except Exception as e:
-        return await msg.reply(f"❌ Could not read new HEAD: {e}")
+    # upgrade safoneapi
+    await msg.reply("⬆️ Upgrading safoneapi…")
+    sa_up = run(["pip3","install","--upgrade","safoneapi"])
+    if sa_up.returncode != 0:
+        await msg.reply(f"⚠️ safoneapi upgrade failed:\n```{sa_up.stderr}```")
+    else:
+        await msg.reply("✅ safoneapi is up to date.")
 
-    # 4) diff-stat
-    stat = run(["git", "diff", "--stat", old, new]).stdout.strip() or "✅ No changes"
-
-    # 5) diff snippet
-    diff_full = run(["git", "diff", old, new]).stdout
+    # diff-stat & snippet
+    old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
+    new = run(["git","rev-parse","HEAD"]).stdout.strip()
+    stat = run(["git","diff","--stat",old,new]).stdout.strip() or "✅ No changes"
+    diff_full = run(["git","diff",old,new]).stdout
     snippet = diff_full[:2000]
 
-    # 6) report
     await msg.reply(f"📦 Changes {old[:7]}→{new[:7]}:\n```{stat}```")
     if snippet:
         await msg.reply(f"🔍 Diff snippet:\n```{snippet}```")
         if len(diff_full) > len(snippet):
             await msg.reply("…and more lines omitted.")
-    if err:
-        await msg.reply(f"⚠️ Git stderr:\n```{err}```")
 
-    # 7) hot-restart
+    # hot-restart
     await asyncio.sleep(1)
     await msg.reply("🔄 Restarting now, Master…")
     await shutdown()
@@ -187,7 +190,7 @@ async def main() -> None:
     # Graceful shutdown on SIGINT/SIGTERM
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown()))
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("🚀 Jarvis started.")
