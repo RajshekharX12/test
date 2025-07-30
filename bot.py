@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jarvis v1.0.70 — ChatGPT-only core + full “Jarvis restart” self‑update
+Jarvis v1.0.70 — ChatGPT‑only core + full “Jarvis restart” self‑update
 
 Features:
  • Catch‑all private‑chat handler → api.chatgpt(prompt)
@@ -11,16 +11,8 @@ Features:
      3) pip install --upgrade safoneapi
      4) show diff‑stat + snippet
      5) hot‑restart via os.execv
+ • New instance sends a “back online” confirmation
  • Response time appended to every reply
-
-Usage:
- 1. Create a `.env` alongside this file:
-      BOT_TOKEN=<your_bot_token>
- 2. Create a `requirements.txt` listing your deps.
- 3. Install deps:
-      pip install -r requirements.txt safoneapi==1.0.69
- 4. Launch in your repo folder:
-      screen -S jarvis python3 bot.py
 """
 
 import os
@@ -43,8 +35,11 @@ from dotenv import load_dotenv
 # ─── CONFIGURATION ────────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+MASTER_ID = os.getenv("MASTER_ID", "").strip()  # optional: your Telegram user ID
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN is not set in .env")
+if MASTER_ID:
+    MASTER_ID = int(MASTER_ID)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,12 +125,9 @@ async def restart_handler(msg: types.Message) -> None:
 
     def run(cmd, timeout=120):
         return subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            timeout=timeout
+            cmd, cwd=cwd,
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=timeout
         )
 
     # git pull
@@ -162,8 +154,8 @@ async def restart_handler(msg: types.Message) -> None:
     # diff-stat & snippet
     old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
     new = run(["git","rev-parse","HEAD"]).stdout.strip()
-    stat = run(["git","diff","--stat",old,new]).stdout.strip() or "✅ No changes"
-    diff_full = run(["git","diff",old,new]).stdout
+    stat = run(["git","diff","--stat", old, new]).stdout.strip() or "✅ No changes"
+    diff_full = run(["git","diff", old, new]).stdout
     snippet = diff_full[:2000]
 
     await msg.reply(f"📦 Changes {old[:7]}→{new[:7]}:\n```{stat}```")
@@ -172,8 +164,7 @@ async def restart_handler(msg: types.Message) -> None:
         if len(diff_full) > len(snippet):
             await msg.reply("…and more lines omitted.")
 
-    # hot-restart
-    await asyncio.sleep(1)
+    # final restart message (no extra quotes!)
     await msg.reply("🔄 Restarting now, Master…")
     await shutdown()
     do_restart()
@@ -187,6 +178,10 @@ async def chat_handler(msg: types.Message) -> None:
     await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
 
 async def main() -> None:
+    # Optionally, notify you when Jarvis is back online
+    if MASTER_ID:
+        await bot.send_message(MASTER_ID, "✅ Jarvis is back online, Master.")
+
     # Graceful shutdown on SIGINT/SIGTERM
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -202,3 +197,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
+
