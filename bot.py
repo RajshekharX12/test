@@ -147,12 +147,12 @@ async def restart_handler(msg: types.Message) -> None:
         except Exception as e:
             summary = f"⚠️ Failed to summarise diff: {e}"
 
-        # 5) send summary back (avoid Markdown parse errors)
+        # 5) send summary back as plain text (no entity parsing)
         safe_summary = f"```\n{summary[:3800]}\n```"
         await bot.send_message(
             chat_id,
             "✅ Update complete!\n\n" + safe_summary,
-            parse_mode="MarkdownV2"
+            parse_mode=None
         )
 
         # 6) final restart
