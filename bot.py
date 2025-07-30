@@ -175,7 +175,7 @@ async def chat_handler(msg: types.Message) -> None:
 # ─── PLUGINS ────────────────────────────────────────────────────
 import fragment_url    # inline +888 URL handler
 import logs_utils      # top‑error logging plugin
-
+import code_review 
 # ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
     loop = asyncio.get_event_loop()
