@@ -2,61 +2,101 @@
 """
 code_review.py
 
-“Jarvis review code” plugin — sends your .py files to ChatGPT and returns
-a consolidated list of high‑level improvement suggestions.
+“Jarvis review code” → AI‑powered code health summary.
+
+• Prints a load message on import.
+• Registers a private‑chat handler for “jarvis review code”.
+• Reads all .py files in cwd, sends to ChatGPT.
+• Parses its response into:
+    • Overall “health” percentage
+    • Top 3 issues
+    • High‑level suggestions
+• Replies with a compact, formatted message.
 """
 
 import sys
 import glob
 import asyncio
-from pathlib import Path
-
 from aiogram import F, types
 from aiogram.enums import ChatType
 
-# Grab our bot & SafoneAPI client
+# Pull in your bot & dispatcher
 _main = sys.modules["__main__"]
 dp    = _main.dp
-bot   = _main.bot
 api   = _main.api
+
+print("⚙️ code_review.py loaded")
 
 @dp.message(
     F.chat.type == ChatType.PRIVATE,
     F.text.regexp(r"(?i)^jarvis review code$")
 )
-async def code_review_handler(msg: types.Message) -> None:
-    await msg.reply("🔍 Gathering code for review…")
-    # 1) Read all .py files in the current directory
-    code_map = {}
-    for path in glob.glob("*.py"):
+async def review_code_handler(msg: types.Message):
+    # 1) Ack
+    await msg.reply("🔍 Gathering code for review… this may take a moment.")
+
+    # 2) Load all .py files
+    files = glob.glob("*.py")
+    if not files:
+        return await msg.reply("⚠️ No Python files found to review.")
+
+    combined = ""
+    for fn in files:
         try:
-            text = Path(path).read_text(encoding="utf-8")
+            with open(fn, "r", encoding="utf‑8") as f:
+                snippet = f.read()
         except Exception:
-            text = ""
-        # truncate long files to first 1500 chars each
-        snippet = text if len(text) < 1500 else text[:1500] + "\n...TRUNCATED..."
-        code_map[path] = snippet
+            snippet = "<couldn't read file>"
+        combined += f"\n\n# === {fn} ===\n{snippet}"
 
-    # 2) Build the ChatGPT prompt
-    sections = []
-    for fname, snippet in code_map.items():
-        sections.append(f"### File: {fname}\n```python\n{snippet}\n```")
-    joined = "\n\n".join(sections)
-
+    # 3) Ask ChatGPT
     prompt = (
-        "You are Jarvis’s senior engineer. Please review the following Python code files and "
-        "provide a concise list of high‑level suggestions for improving the codebase. "
-        "Focus on readability, error handling, performance, security, and best practices. "
-        "Respond as numbered bullet points.\n\n"
-        f"{joined}"
+        "You are a senior Python code reviewer.\n"
+        "Please analyze the following code snippets for:\n"
+        "  1) An overall health score (0-100%)\n"
+        "  2) The top 3 most critical issues (with filenames/line numbers)\n"
+        "  3) A few high-level suggestions to improve readability, structure, or performance.\n\n"
+        f"{combined}\n\n"
+        "Provide your answer in JSON with keys: score, issues, suggestions."
     )
 
-    # 3) Send to ChatGPT
     try:
         resp = await api.chatgpt(prompt)
-        suggestions = getattr(resp, "message", str(resp))
+        text = getattr(resp, "message", str(resp))
     except Exception as e:
-        return await msg.reply(f"⚠️ Code review failed: {e}")
+        return await msg.reply(f"🚨 Review failed: {e}")
 
-    # 4) Reply with the suggestions
-    await msg.reply(f"🛠️ Code Review Suggestions:\n\n{suggestions}")
+    # 4) Attempt to parse JSON-like response
+    import json, re
+    # crude extraction of JSON block
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    data = {}
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            data = {}
+
+    # 5) Build a neat reply
+    if data.get("score") is not None:
+        score = data["score"]
+        issues = data.get("issues", [])
+        suggs = data.get("suggestions", [])
+        reply = [f"✅ Code Health: *{score}%*"]
+        if issues:
+            reply.append("\n*Top 3 Issues:*")
+            for i, it in enumerate(issues[:3], 1):
+                reply.append(f"  {i}. {it}")
+        if suggs:
+            reply.append("\n*Suggestions:*")
+            for s in suggs[:3]:
+                reply.append(f"  • {s}")
+        reply_text = "\n".join(reply)
+    else:
+        # fallback to raw text
+        reply_text = text[:3900]
+        if len(text) > 3900:
+            reply_text += "\n\n…(truncated)…"
+
+    # 6) Send back
+    await msg.reply(reply_text, parse_mode="Markdown")
