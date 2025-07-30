@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 # ─── CONFIG ─────────────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+MASTER_ID = int(os.getenv("MASTER_ID", "0"))
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 
@@ -48,7 +50,7 @@ async def shutdown() -> None:
     await bot.session.close()
 
 def do_restart() -> None:
-    """Re‑exec this script (hot‑restart)."""
+    """Re-exec this script (hot-restart)."""
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 # ─── MEMORY & RATE LIMIT ───────────────────────────────────────
@@ -90,66 +92,12 @@ async def process_query(user_id: int, text: str) -> str:
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp  = Dispatcher()
 
+# ─── NEW: AI‑driven preflight restart guard ───────────────────
+import threat    # AI‑powered preflight restart guard
+
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(msg: types.Message) -> None:
     await msg.answer("👋 Greetings, Master! Jarvis is online — just say anything.")
-
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
-async def restart_handler(msg: types.Message) -> None:
-    """
-    Runs self‑update in background:
-      • git pull
-      • pip install -r requirements.txt
-      • pip install --upgrade safoneapi
-      • summarise diff via ChatGPT
-      • restart
-    """
-    await msg.reply("⏳ Updating in background…")
-
-    async def _do_update(chat_id: int):
-        cwd = os.path.dirname(__file__)
-        def run(cmd):
-            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-
-        # 1) git pull
-        pull = run(["git","pull"])
-        if pull.returncode != 0:
-            await bot.send_message(chat_id, f"❌ Git pull failed:\n```{pull.stderr}```", parse_mode=ParseMode.MARKDOWN)
-            return
-
-        # 2) pip deps
-        deps = run(["pip3","install","-r","requirements.txt"])
-        if deps.returncode != 0:
-            await bot.send_message(chat_id, f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```", parse_mode=ParseMode.MARKDOWN)
-            return
-
-        # 3) upgrade safoneapi
-        run(["pip3","install","--upgrade","safoneapi"])
-
-        # 4) diff
-        old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
-        new = run(["git","rev-parse","HEAD"]).stdout.strip()
-        diff = run(["git","diff", old, new]).stdout.strip() or "No changes"
-
-        # 5) summarise via GPT
-        prompt = (
-            f"Master ordered a code update. Here is the git diff ({old}→{new}):\n"
-            f"{diff}\n"
-            "Please summarise file-by-file the additions and deletions in short bullets."
-        )
-        try:
-            resp = await api.chatgpt(prompt)
-            summary = getattr(resp, "message", str(resp))
-        except Exception as e:
-            summary = f"⚠️ Failed to summarise diff: {e}"
-
-        await bot.send_message(chat_id, f"✅ Update complete!\n\n{summary}")
-
-        # 6) final restart
-        await shutdown()
-        do_restart()
-
-    asyncio.create_task(_do_update(msg.from_user.id))
 
 @dp.message(
     F.chat.type == ChatType.PRIVATE,
@@ -162,10 +110,9 @@ async def chat_handler(msg: types.Message) -> None:
     elapsed = perf_counter() - start
     await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
 
-
 # ─── PLUGINS ────────────────────────────────────────────────────
-import fragment_url    # inline +888 URL
-import logs_utils      # top‑error summary
+import fragment_url    # inline +888 URL handler
+import logs_utils      # top‑error logging plugin
 
 # ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
