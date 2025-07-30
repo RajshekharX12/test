@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
-"""
-Jarvis v1.0.69 — full-memory chat + vision + in‑memory error logging
-"""
-
 import os
 import re
 import logging
 import asyncio
+from collections import deque
 
+import httpx
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
@@ -21,23 +18,25 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in .env")
 
-# ─── SETUP ─────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("jarvis")
+# ─── LOGGING ───────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
-dp  = Dispatcher()
-api = SafoneAPI()
+# ─── HTTP CLIENT & API ─────────────────────────────────────────
+http_client = httpx.AsyncClient(timeout=10)
+api = SafoneAPI()  # assuming default uses shared client internally
 
-# ─── IN‑MEMORY STORAGE ─────────────────────────────────────────
-conversation_histories: dict[int, list[dict[str,str]]] = {}
-error_logs: list[str] = []  # store timestamped error messages
+# ─── MEMORY CONFIG ─────────────────────────────────────────────
+# keep only last 6 messages per user for speed
+MAX_HISTORY = 6
+conversation_histories: dict[int, deque[dict[str, str]]] = {}
 
 SYSTEM_PROMPT = (
     "You are Jarvis, a professional AI assistant. "
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
 )
 
+# ─── INTENT MAP ─────────────────────────────────────────────────
 INTENT_MAP = {
     "technical": "chatgpt",
     "creative":  "gemini",
@@ -47,13 +46,6 @@ INTENT_MAP = {
     "summary":   "chatgpt",
     "ideation":  "gemini",
 }
-
-def log_error(exc: Exception):
-    """Record an error with timestamp, trimming to last 100 entries."""
-    entry = f"{asyncio.get_event_loop().time():.1f} ERROR: {type(exc).__name__}: {exc}"
-    error_logs.append(entry)
-    if len(error_logs) > 100:
-        error_logs.pop(0)
 
 def detect_intent(text: str) -> str:
     txt = text.lower()
@@ -71,119 +63,94 @@ def detect_intent(text: str) -> str:
         return "factual"
     return "technical"
 
+# ─── CORE QUERY PROCESSING ────────────────────────────────────
 async def process_query(user_id: int, text: str) -> str:
-    history = conversation_histories.setdefault(user_id, [])
-    history.append({"role":"user","content":text})
+    history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
+    history.append({"role": "user", "content": text})
 
-    prompt = SYSTEM_PROMPT + "".join(
+    prompt = SYSTEM_PROMPT + ''.join(
         f"{'Master:' if m['role']=='user' else 'Jarvis:'} {m['content']}\n"
         for m in history
     )
 
     intent = detect_intent(text)
     endpoint = INTENT_MAP.get(intent, "chatgpt")
-    api_call  = getattr(api, endpoint, api.chatgpt)
+    api_call = getattr(api, endpoint, api.chatgpt)
 
     try:
         resp = await api_call(prompt)
-    except Exception as e:
-        log_error(e)
-        # on context error, retry with last message only
-        if isinstance(e, GenericApiError) and "reduce the context" in str(e).lower():
+    except GenericApiError as e:
+        if "reduce the context" in str(e).lower():
             last = history[-1]
-            conversation_histories[user_id] = [last]
-            prompt = SYSTEM_PROMPT + f"Master: {last['content']}\n"
-            try:
-                resp = await api_call(prompt)
-            except Exception as e2:
-                log_error(e2)
-                return f"🚨 Error after retry: {e2}"
+            conversation_histories[user_id] = deque([last], maxlen=MAX_HISTORY)
+            retry_prompt = SYSTEM_PROMPT + f"Master: {last['content']}\n"
+            resp = await api_call(retry_prompt)
         else:
-            return f"🚨 Error processing your request: {e}"
+            raise
 
-    answer = getattr(resp, "message", None) or str(resp)
-    history.append({"role":"bot","content":answer})
+    answer = getattr(resp, 'message', None) or str(resp)
+    history.append({"role": "bot", "content": answer})
     return answer
+
+# ─── BOT SETUP & HANDLERS ─────────────────────────────────────
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+dp = Dispatcher()
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Hello, Master! I'm Jarvis v1.0.69—type or send anything, and I'll remember it.\n"
-        "Say “show me recent logs” to view my last errors."
+        "👋 Hello, Master! I'm Jarvis v1.0.69—type or send anything, and I'll reply quickly and remember the last few messages."
     )
-
-@dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r'(?i)\bshow (me )?recent logs\b'))
-async def show_logs_handler(message: types.Message):
-    # send up to last 20 error entries
-    last = "\n".join(error_logs[-20:]) or "✅ No errors logged."
-    # split to avoid Telegram limits
-    for chunk in re.findall(r'.{1,3900}(?:\n|$)', last):
-        await message.reply(f"```\n{chunk}```", parse_mode=ParseMode.MARKDOWN)
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
 async def text_handler(message: types.Message):
-    try:
-        ans = await process_query(message.from_user.id, message.text.strip())
-    except Exception as e:
-        log_error(e)
-        ans = f"🚨 Unexpected error: {e}"
-    await message.reply(ans)
+    answer = await process_query(message.from_user.id, message.text.strip())
+    await message.reply(answer)
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.document)
 async def document_handler(message: types.Message):
     user_id = message.from_user.id
-    doc     = message.document
-    try:
-        file = await bot.get_file(doc.file_id)
-        data = await bot.download_file(file.file_path)
+    doc = message.document
+    file = await bot.get_file(doc.file_id)
+    data = await bot.download_file(file.file_path)
 
-        conversation_histories.setdefault(user_id, []).append(
-            {"role":"user","content":f"<Document {doc.file_name}>"}
-        )
+    history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
+    history.append({"role": "user", "content": f"<Document {doc.file_name}>"})
 
-        ocr = getattr(api, "ocr_text_scanner", None) or getattr(api, "document_ocr", None)
-        if not ocr:
-            return await message.reply("⚠️ Document analysis API not available.")
+    ocr = getattr(api, 'ocr_text_scanner', None) or getattr(api, 'document_ocr', None)
+    if not ocr:
+        return await message.reply("⚠️ Document analysis API not available.")
+    resp = await ocr(data)
+    summary = getattr(resp, 'summary', None) or getattr(resp, 'text', None) or str(resp)
 
-        resp = await ocr(data)
-        summary = getattr(resp, "summary", None) or getattr(resp, "text", None) or str(resp)
-        conversation_histories[user_id].append({"role":"bot","content":summary})
-        await message.reply(summary)
-
-    except Exception as e:
-        log_error(e)
-        await message.reply(f"🚨 Error analyzing document: {e}")
+    history.append({"role": "bot", "content": summary})
+    await message.reply(summary)
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.photo)
 async def photo_handler(message: types.Message):
     user_id = message.from_user.id
-    photo   = message.photo[-1]
-    try:
-        file = await bot.get_file(photo.file_id)
-        data = await bot.download_file(file.file_path)
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    data = await bot.download_file(file.file_path)
 
-        conversation_histories.setdefault(user_id, []).append(
-            {"role":"user","content":"<Photo>"}
-        )
+    history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
+    history.append({"role": "user", "content": "<Photo>"})
 
-        recog = getattr(api, "image_recognition", None) or getattr(api, "ocr_text_scanner", None)
-        if not recog:
-            return await message.reply("⚠️ Image analysis API not available.")
+    recog = getattr(api, 'image_recognition', None) or getattr(api, 'ocr_text_scanner', None)
+    if not recog:
+        return await message.reply("⚠️ Image analysis API not available.")
+    resp = await recog(data)
+    description = getattr(resp, 'description', None) or getattr(resp, 'text', None) or str(resp)
 
-        resp = await recog(data)
-        desc = getattr(resp, "description", None) or getattr(resp, "text", None) or str(resp)
-        conversation_histories[user_id].append({"role":"bot","content":desc})
-        await message.reply(desc)
+    history.append({"role": "bot", "content": description})
+    await message.reply(description)
 
-    except Exception as e:
-        log_error(e)
-        await message.reply(f"🚨 Error analyzing image: {e}")
-
+# ─── MAIN ─────────────────────────────────────────────────────
 async def main():
-    # clear webhook / old updates
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🚀 Jarvis started: full-memory + in‑memory error logs.")
+    logger.info("🚀 Jarvis started: fast mode with capped history.")
     await dp.start_polling(bot, skip_updates=True)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
+
