@@ -24,7 +24,8 @@ import asyncio
 from time import perf_counter
 from collections import deque
 from typing import Deque, Dict
-
+import fragment_url
+import logs_utils
 import httpx
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
