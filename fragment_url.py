@@ -2,8 +2,8 @@
 """
 fragment_url.py
 
-• format_fragment_url(raw_number: str) -> str  
-• Registers an inline query handler on import.
+• format_fragment_url(raw_number: str) -> str
+• Registers an inline‑query handler on import.
 """
 
 import re
@@ -12,20 +12,17 @@ from typing import Final
 
 from aiogram import types, F
 from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
-
-# Import the running Dispatcher & Bot from bot.py
-from bot import dp, bot
+from bot import dp, bot  # assumes bot.py defines dp & bot
 
 BASE_URL: Final[str] = "https://fragment.com/number/{number}/code"
 
 def format_fragment_url(raw_number: str) -> str:
     """
     Normalize a phone number and return the Fragment URL.
-
-    1. Strip leading '+' and whitespace
-    2. Remove all non‑digits
-    3. Prepend '888' if missing
-    4. Return "https://fragment.com/number/<num>/code"
+    1) Strip leading '+' and whitespace
+    2) Remove all non‑digits
+    3) Prepend '888' if missing
+    4) Return "https://fragment.com/number/<num>/code"
     """
     if not isinstance(raw_number, str):
         raise ValueError("Input must be a string")
@@ -42,11 +39,6 @@ def format_fragment_url(raw_number: str) -> str:
 
 @dp.inline_query(F.query)  # only handle non‑empty inline queries
 async def inline_fragment_handler(inline_q: types.InlineQuery) -> None:
-    """
-    Takes any pure‑digit inline query, normalizes it,
-    and returns a single InlineQueryResultArticle
-    whose content is the Fragment.com URL.
-    """
     raw = inline_q.query or ""
     cleaned = re.sub(r"\D", "", raw)
 
@@ -63,9 +55,7 @@ async def inline_fragment_handler(inline_q: types.InlineQuery) -> None:
         id=str(uuid.uuid4()),
         title="Fragment check URL",
         description=url,
-        input_message_content=InputTextMessageContent(
-            message_text=url
-        )
+        input_message_content=InputTextMessageContent(message_text=url)
     )
 
     await bot.answer_inline_query(
