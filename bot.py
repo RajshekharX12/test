@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jarvis v1.0.70 — ChatGPT‑only core + self‑update & logging plugins
+Jarvis v1.0.71 — ChatGPT‑only core + self‑update & top‑error logging
 """
 
 import os
@@ -20,36 +20,44 @@ from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
-# ─── CONFIG ────────────────────────────────────────────────
+# ─── CONFIG ─────────────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# ─── LOGGING ───────────────────────────────────────────────────
+log_path = os.path.join(os.path.dirname(__file__), "bot.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_path, encoding="utf-8")
+    ]
+)
 logger = logging.getLogger("jarvis")
 
-# ─── API CLIENT & HTTP SESSION ─────────────────────────────
-api = SafoneAPI()               # chatgpt-only
-http_client = httpx.AsyncClient(timeout=10)
+# ─── API CLIENT & HTTP SESSION ─────────────────────────────────
+api = SafoneAPI()
+http_client = httpx.AsyncClient(timeout=10.0)
 
 async def shutdown() -> None:
-    """Graceful shutdown: close http client and bot."""
+    """Graceful shutdown: close HTTP client & bot session."""
     await http_client.aclose()
     await bot.session.close()
 
 def do_restart() -> None:
-    """Hot‑restart via execv."""
+    """Re‑exec this script (hot‑restart)."""
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-# ─── MEMORY & RATE LIMIT ────────────────────────────────────
+# ─── MEMORY & RATE LIMIT ───────────────────────────────────────
 MAX_HISTORY = 6
 histories: Dict[int, Deque[Dict[str,str]]] = {}
 USER_LAST_TS: Dict[int, float] = {}
-MIN_INTERVAL = 1.0  # per‑user seconds
+MIN_INTERVAL = 1.0
 
 async def process_query(user_id: int, text: str) -> str:
-    """Build short history + query → ChatGPT → answer."""
     now = asyncio.get_event_loop().time()
     last = USER_LAST_TS.get(user_id, 0)
     if now - last < MIN_INTERVAL:
@@ -78,7 +86,7 @@ async def process_query(user_id: int, text: str) -> str:
     hist.append({"role":"bot","content":answer})
     return answer
 
-# ─── TELEGRAM BOT SETUP ──────────────────────────────────────
+# ─── TELEGRAM BOT SETUP ────────────────────────────────────────
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp  = Dispatcher()
 
@@ -88,33 +96,60 @@ async def cmd_start(msg: types.Message) -> None:
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
 async def restart_handler(msg: types.Message) -> None:
-    """Self‑update from Git + pip + restart."""
-    await msg.reply("🔄 Pulling latest code…")
-    cwd = os.path.dirname(__file__)
-    def run(cmd):
-        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-    pull = run(["git","pull"])
-    if pull.returncode != 0:
-        return await msg.reply(f"❌ Git pull failed:\n```{pull.stderr}```")
-    await msg.reply(f"✅ Git pull done:\n```{pull.stdout}```")
-    await msg.reply("🔧 Installing dependencies…")
-    deps = run(["pip3","install","-r","requirements.txt"])
-    if deps.returncode != 0:
-        return await msg.reply(f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```")
-    await msg.reply("✅ Dependencies installed.")
-    await msg.reply("⬆️ Upgrading safoneapi…")
-    up = run(["pip3","install","--upgrade","safoneapi"])
-    if up.returncode != 0:
-        await msg.reply(f"⚠️ safoneapi upgrade failed:\n```{up.stderr}```")
-    else:
-        await msg.reply("✅ safoneapi is up to date.")
-    old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
-    new = run(["git","rev-parse","HEAD"]).stdout.strip()
-    stat = run(["git","diff","--stat", old, new]).stdout.strip() or "No changes"
-    await msg.reply(f"📦 Changes {old[:7]}→{new[:7]}:\n```{stat}```")
-    await msg.reply("🔄 Restarting…")
-    await shutdown()
-    do_restart()
+    """
+    Runs self‑update in background:
+      • git pull
+      • pip install -r requirements.txt
+      • pip install --upgrade safoneapi
+      • summarise diff via ChatGPT
+      • restart
+    """
+    await msg.reply("⏳ Updating in background…")
+
+    async def _do_update(chat_id: int):
+        cwd = os.path.dirname(__file__)
+        def run(cmd):
+            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+        # 1) git pull
+        pull = run(["git","pull"])
+        if pull.returncode != 0:
+            await bot.send_message(chat_id, f"❌ Git pull failed:\n```{pull.stderr}```", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        # 2) pip deps
+        deps = run(["pip3","install","-r","requirements.txt"])
+        if deps.returncode != 0:
+            await bot.send_message(chat_id, f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```", parse_mode=ParseMode.MARKDOWN)
+            return
+
+        # 3) upgrade safoneapi
+        run(["pip3","install","--upgrade","safoneapi"])
+
+        # 4) diff
+        old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
+        new = run(["git","rev-parse","HEAD"]).stdout.strip()
+        diff = run(["git","diff", old, new]).stdout.strip() or "No changes"
+
+        # 5) summarise via GPT
+        prompt = (
+            f"Master ordered a code update. Here is the git diff ({old}→{new}):\n"
+            f"{diff}\n"
+            "Please summarise file-by-file the additions and deletions in short bullets."
+        )
+        try:
+            resp = await api.chatgpt(prompt)
+            summary = getattr(resp, "message", str(resp))
+        except Exception as e:
+            summary = f"⚠️ Failed to summarise diff: {e}"
+
+        await bot.send_message(chat_id, f"✅ Update complete!\n\n{summary}")
+
+        # 6) final restart
+        await shutdown()
+        do_restart()
+
+    asyncio.create_task(_do_update(msg.from_user.id))
 
 @dp.message(
     F.chat.type == ChatType.PRIVATE,
@@ -125,13 +160,13 @@ async def chat_handler(msg: types.Message) -> None:
     start = perf_counter()
     reply = await process_query(msg.from_user.id, msg.text.strip())
     elapsed = perf_counter() - start
-    await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
+    await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s}")
 
-# ─── PLUGIN IMPORTS ───────────────────────────────────────────
-import fragment_url    # Inline‑number handler
-import logs_utils      # “Jarvis logs” handler
+# ─── PLUGINS ────────────────────────────────────────────────────
+import fragment_url    # inline +888 URL
+import logs_utils      # top‑error summary
 
-# ─── MAIN ──────────────────────────────────────────────────────
+# ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
