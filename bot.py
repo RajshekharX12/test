@@ -2,7 +2,7 @@
 """
 bot.py
 
-Jarvis v1.0.71 — ChatGPT‑only core + self‑update & top‑error logging
+Jarvis v1.0.71 — ChatGPT-only core + self-update & top-error logging
 """
 
 import os
@@ -97,7 +97,7 @@ dp  = Dispatcher()
 # ─── RESTART LOGIC (used by threat.py) ────────────────────────
 async def restart_handler(msg: types.Message) -> None:
     """
-    Self‐update flow called after health checks pass:
+    Self-update flow called after health checks pass:
       • git pull
       • pip install -r requirements.txt
       • pip install --upgrade safoneapi
@@ -136,7 +136,7 @@ async def restart_handler(msg: types.Message) -> None:
         prompt = (
             f"Master, here’s the diff between commits {old}→{new}:\n"
             f"{diff}\n\n"
-            "Give me a concise, high‑level summary by file: "
+            "Give me a concise, high-level summary by file: "
             "- Describe only meaningful functional or structural changes. "
             "- Skip trivial whitespace edits. "
             "Use bullet points."
@@ -147,15 +147,22 @@ async def restart_handler(msg: types.Message) -> None:
         except Exception as e:
             summary = f"⚠️ Failed to summarise diff: {e}"
 
-        await bot.send_message(chat_id, f"✅ Update complete!\n\n{summary}")
+        # 5) send summary back (avoid Markdown parse errors)
+        safe_summary = f"```\n{summary[:3800]}\n```"
+        await bot.send_message(
+            chat_id,
+            "✅ Update complete!\n\n" + safe_summary,
+            parse_mode="MarkdownV2"
+        )
 
+        # 6) final restart
         await shutdown()
         do_restart()
 
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── IMPORT THE GUARD ─────────────────────────────────────────
-import threat    # AI‑powered preflight restart guard
+import threat    # AI-powered preflight restart guard
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(msg: types.Message) -> None:
@@ -173,10 +180,10 @@ async def chat_handler(msg: types.Message) -> None:
     await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
 
 # ─── PLUGINS ────────────────────────────────────────────────────
-# ─── PLUGINS ─────────────────────────────────────────
 import fragment_url   # inline +888 URL
-import logs_utils     # top‑error summary
-import code_review    # AI‑driven “Jarvis review code”
+import logs_utils     # top-error summary
+import code_review    # AI-driven “Jarvis review code”
+
 # ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
     loop = asyncio.get_event_loop()
@@ -190,3 +197,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
+
