@@ -173,9 +173,10 @@ async def chat_handler(msg: types.Message) -> None:
     await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
 
 # ─── PLUGINS ────────────────────────────────────────────────────
-import fragment_url    # inline +888 URL handler
-import logs_utils      # top‑error logging plugin
-import code_review 
+# ─── PLUGINS ─────────────────────────────────────────
+import fragment_url   # inline +888 URL
+import logs_utils     # top‑error summary
+import code_review    # AI‑driven “Jarvis review code”
 # ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
     loop = asyncio.get_event_loop()
