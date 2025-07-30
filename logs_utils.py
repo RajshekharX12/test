@@ -8,11 +8,10 @@ logs_utils.py
 
 from pathlib import Path
 from typing import List
+
 from aiogram import types, F
 from aiogram.enums import ChatType, ParseMode
-
-# Import the running dispatcher & bot
-from bot import dp
+from bot import dp  # assumes bot.py defines dp
 
 LOG_PATH = Path("bot.log")
 
@@ -23,6 +22,7 @@ def get_log_chunks(path: str, chunk_size: int = 4000) -> List[str]:
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis logs$"))
 async def logs_handler(msg: types.Message) -> None:
+    """Stream back bot.log in 4 000‑char slices."""
     if not LOG_PATH.exists():
         return await msg.reply("⚠️ No bot.log file found.")
     chunks = get_log_chunks(str(LOG_PATH))
@@ -30,4 +30,3 @@ async def logs_handler(msg: types.Message) -> None:
         return await msg.reply("⚠️ bot.log is empty.")
     for chunk in chunks:
         await msg.reply(f"```{chunk}```", parse_mode=ParseMode.MARKDOWN)
-
