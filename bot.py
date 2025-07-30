@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+"""
+Jarvis v1.0.69 — fast mode with smart endpoint routing and fixed instantiation
+
+Dependencies:
+  • aiogram==3.4.1
+  • safoneapi==1.0.69
+  • python-dotenv==1.0.1
+  • httpx==0.24.0
+  • tgcrypto   # for Pyrogram speedups (install with `pip install tgcrypto`)
+"""
+
 import os
 import re
 import logging
@@ -6,7 +18,7 @@ from collections import deque
 
 import httpx
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode, ChatType
+from aiogram.enums import ParseMode, ChatType, DefaultBotProperties
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from SafoneAPI.errors import GenericApiError
@@ -20,14 +32,14 @@ if not BOT_TOKEN:
 
 # ─── LOGGING ───────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("jarvis")
 
-# ─── HTTP CLIENT & API ─────────────────────────────────────────
+# ─── HTTP CLIENT & SAFONE API ─────────────────────────────────
 http_client = httpx.AsyncClient(timeout=10)
-api = SafoneAPI()  # assuming default uses shared client internally
+api = SafoneAPI()  # uses internal httpx client
 
 # ─── MEMORY CONFIG ─────────────────────────────────────────────
-# keep only last 6 messages per user for speed
+# cap history at last 6 messages for speed
 MAX_HISTORY = 6
 conversation_histories: dict[int, deque[dict[str, str]]] = {}
 
@@ -36,7 +48,7 @@ SYSTEM_PROMPT = (
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
 )
 
-# ─── INTENT MAP ─────────────────────────────────────────────────
+# ─── INTENT-TO-ENDPOINT MAPPING ─────────────────────────────────
 INTENT_MAP = {
     "technical": "chatgpt",
     "creative":  "gemini",
@@ -63,12 +75,12 @@ def detect_intent(text: str) -> str:
         return "factual"
     return "technical"
 
-# ─── CORE QUERY PROCESSING ────────────────────────────────────
+# ─── CORE PROCESSING ────────────────────────────────────────────
 async def process_query(user_id: int, text: str) -> str:
     history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
     history.append({"role": "user", "content": text})
 
-    prompt = SYSTEM_PROMPT + ''.join(
+    prompt = SYSTEM_PROMPT + "".join(
         f"{'Master:' if m['role']=='user' else 'Jarvis:'} {m['content']}\n"
         for m in history
     )
@@ -88,18 +100,22 @@ async def process_query(user_id: int, text: str) -> str:
         else:
             raise
 
-    answer = getattr(resp, 'message', None) or str(resp)
+    answer = getattr(resp, "message", None) or str(resp)
     history.append({"role": "bot", "content": answer})
     return answer
 
-# ─── BOT SETUP & HANDLERS ─────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+# ─── BOT & HANDLERS ────────────────────────────────────────────
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+)
 dp = Dispatcher()
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Hello, Master! I'm Jarvis v1.0.69—type or send anything, and I'll reply quickly and remember the last few messages."
+        "👋 Hello, Master! I'm Jarvis v1.0.69—type or send anything, "
+        "and I'll pick the best AI model (chatgpt, gemini, llama3, asq) and reply swiftly."
     )
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
@@ -117,11 +133,11 @@ async def document_handler(message: types.Message):
     history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
     history.append({"role": "user", "content": f"<Document {doc.file_name}>"})
 
-    ocr = getattr(api, 'ocr_text_scanner', None) or getattr(api, 'document_ocr', None)
+    ocr = getattr(api, "ocr_text_scanner", None) or getattr(api, "document_ocr", None)
     if not ocr:
         return await message.reply("⚠️ Document analysis API not available.")
     resp = await ocr(data)
-    summary = getattr(resp, 'summary', None) or getattr(resp, 'text', None) or str(resp)
+    summary = getattr(resp, "summary", None) or getattr(resp, "text", None) or str(resp)
 
     history.append({"role": "bot", "content": summary})
     await message.reply(summary)
@@ -136,21 +152,22 @@ async def photo_handler(message: types.Message):
     history = conversation_histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
     history.append({"role": "user", "content": "<Photo>"})
 
-    recog = getattr(api, 'image_recognition', None) or getattr(api, 'ocr_text_scanner', None)
+    recog = getattr(api, "image_recognition", None) or getattr(api, "ocr_text_scanner", None)
     if not recog:
         return await message.reply("⚠️ Image analysis API not available.")
     resp = await recog(data)
-    description = getattr(resp, 'description', None) or getattr(resp, 'text', None) or str(resp)
+    description = getattr(resp, "description", None) or getattr(resp, "text", None) or str(resp)
 
     history.append({"role": "bot", "content": description})
     await message.reply(description)
 
-# ─── MAIN ─────────────────────────────────────────────────────
+# ─── MAIN ───────────────────────────────────────────────────────
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🚀 Jarvis started: fast mode with capped history.")
+    logger.info("🚀 Jarvis started: fast mode, smart endpoint routing.")
     await dp.start_polling(bot, skip_updates=True)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
+
 
