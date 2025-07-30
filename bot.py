@@ -31,6 +31,9 @@ from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
+import re
+from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
+from fragment_url import format_fragment_url
 
 # ─── CONFIGURATION ────────────────────────────────────────────────
 load_dotenv()
@@ -197,4 +200,34 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
+@dp.inline_query(F.query)
+async def inline_number_check(inline_q: types.InlineQuery) -> None:
+    raw = inline_q.query.strip()
+    # remove spaces and leading '+'
+    cleaned = re.sub(r"[ \t]+", "", raw).lstrip('+')
 
+    if not re.fullmatch(r"\d+", cleaned):
+        # ignore non‑digit inline queries
+        return
+
+    try:
+        url = format_fragment_url(cleaned)
+    except ValueError:
+        # invalid number, no results
+        return
+
+    result = InlineQueryResultArticle(
+        id=inline_q.id,
+        title="Check Fragment Number",
+        description=url,
+        input_message_content=InputTextMessageContent(
+            message_text=url,
+            parse_mode=None
+        )
+    )
+
+    await bot.answer_inline_query(
+        inline_q.id,
+        results=[result],
+        cache_time=0  # during development; bump to 300+ in production
+    )
