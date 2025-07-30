@@ -1,7 +1,6 @@
 aiogram==3.4.1
 safoneapi==1.0.69
-python-dotenv==1.0.1
-httpx==0.24.0
-tgcrypto==1.4.2
-
+python-dotenv>=1.0.0
+httpx>=0.24.0
+tgcrypto>=1.2.5   # optional speedup for Pyrogram
 
