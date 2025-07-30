@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jarvis v1.0.69 — fast mode with smart endpoint routing and fixed instantiation
+Jarvis v1.0.69 — fast mode with smart endpoint routing
 
 Dependencies:
   • aiogram==3.4.1
@@ -18,7 +18,7 @@ from collections import deque
 
 import httpx
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode, ChatType, DefaultBotProperties
+from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI
 from SafoneAPI.errors import GenericApiError
@@ -34,12 +34,11 @@ if not BOT_TOKEN:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jarvis")
 
-# ─── HTTP CLIENT & SAFONE API ─────────────────────────────────
+# ─── HTTP CLIENT & SAFONE API ──────────────────────────────────
 http_client = httpx.AsyncClient(timeout=10)
 api = SafoneAPI()  # uses internal httpx client
 
 # ─── MEMORY CONFIG ─────────────────────────────────────────────
-# cap history at last 6 messages for speed
 MAX_HISTORY = 6
 conversation_histories: dict[int, deque[dict[str, str]]] = {}
 
@@ -48,7 +47,7 @@ SYSTEM_PROMPT = (
     "The user is your master. Respond helpfully in friendly English with emojis.\n\n"
 )
 
-# ─── INTENT-TO-ENDPOINT MAPPING ─────────────────────────────────
+# ─── INTENT-TO-ENDPOINT MAP ────────────────────────────────────
 INTENT_MAP = {
     "technical": "chatgpt",
     "creative":  "gemini",
@@ -105,10 +104,7 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── BOT & HANDLERS ────────────────────────────────────────────
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
-)
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
