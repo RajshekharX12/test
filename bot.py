@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+bot.py
+
 Jarvis v1.0.71 — ChatGPT‑only core + self‑update & top‑error logging
 """
 
@@ -92,7 +94,67 @@ async def process_query(user_id: int, text: str) -> str:
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp  = Dispatcher()
 
-# ─── NEW: AI‑driven preflight restart guard ───────────────────
+# ─── RESTART LOGIC (used by threat.py) ────────────────────────
+async def restart_handler(msg: types.Message) -> None:
+    """
+    Self‐update flow called after health checks pass:
+      • git pull
+      • pip install -r requirements.txt
+      • pip install --upgrade safoneapi
+      • summarise diff via ChatGPT
+      • restart
+    """
+    await msg.reply("⏳ Updating in background…")
+
+    async def _do_update(chat_id: int):
+        cwd = os.path.dirname(__file__)
+        def run(cmd):
+            return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+        pull = run(["git","pull"])
+        if pull.returncode != 0:
+            return await bot.send_message(
+                chat_id,
+                f"❌ Git pull failed:\n```{pull.stderr}```",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+        deps = run(["pip3","install","-r","requirements.txt"])
+        if deps.returncode != 0:
+            return await bot.send_message(
+                chat_id,
+                f"❌ `pip install -r requirements.txt` failed:\n```{deps.stderr}```",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+        run(["pip3","install","--upgrade","safoneapi"])
+
+        old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
+        new = run(["git","rev-parse","HEAD"]).stdout.strip()
+        diff = run(["git","diff", old, new]).stdout.strip() or "No changes"
+
+        prompt = (
+            f"Master, here’s the diff between commits {old}→{new}:\n"
+            f"{diff}\n\n"
+            "Give me a concise, high‑level summary by file: "
+            "- Describe only meaningful functional or structural changes. "
+            "- Skip trivial whitespace edits. "
+            "Use bullet points."
+        )
+        try:
+            resp = await api.chatgpt(prompt)
+            summary = getattr(resp, "message", str(resp))
+        except Exception as e:
+            summary = f"⚠️ Failed to summarise diff: {e}"
+
+        await bot.send_message(chat_id, f"✅ Update complete!\n\n{summary}")
+
+        await shutdown()
+        do_restart()
+
+    asyncio.create_task(_do_update(msg.from_user.id))
+
+# ─── IMPORT THE GUARD ─────────────────────────────────────────
 import threat    # AI‑powered preflight restart guard
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
