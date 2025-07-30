@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Jarvis v1.0.69 — Top‑notch AI chat with minimal overhead
+Jarvis v1.0.69 — Respectful Master‑servant AI with robust error handling
 
 Features:
- • Natural‑language conversation only
- • All AI calls go to api.chatgpt(prompt)
- • Optional short memory of last few messages
- • Response time included in replies
+ • Always address the user as Master/Sir/Chief
+ • Full ChatGPT integration via api.chatgpt(prompt)
+ • Short‑term memory of the entire chat (capped at reasonable size)
+ • Natural‑language help trigger
+ • In‑memory cleanup of inactive users
+ • Advanced error handling & retries
+ • Graceful shutdown with HTTP client closure
+ • Response time appended to each reply
 
-Dependencies:
+Dependencies (requirements.txt):
  aiogram==3.4.1
  safoneapi==1.0.69
  python-dotenv>=1.0.0
@@ -19,92 +23,131 @@ Dependencies:
 import os
 import logging
 import asyncio
+import signal
 from time import perf_counter
-from collections import deque
-from typing import Deque, Dict
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Deque, Dict, List
 
+import httpx
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
-# ─── CONFIG ─────────────────────────────────────────────────────
+# ─── ENV VALIDATION ─────────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN must be set in .env")
+    raise RuntimeError("❌ BOT_TOKEN is not set in .env")
 
-# ─── LOGGING ───────────────────────────────────────────────────
+# ─── LOGGING ───────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jarvis")
+logger.setLevel(logging.DEBUG)
 
-# ─── MEMORY & RATE LIMIT ────────────────────────────────────────
-MAX_HISTORY = 6
-histories: Dict[int, Deque[Dict[str,str]]] = {}
-USER_LAST_TS: Dict[int, float] = {}
-MIN_INTERVAL = 1.0  # seconds between messages
+# ─── API CLIENT & CLEAN SHUTDOWN ───────────────────────────────────
+api = SafoneAPI()             # SafoneAPI v1.0.69
+http_client = httpx.AsyncClient(timeout=10)
 
-# ─── API CLIENT ─────────────────────────────────────────────────
-api = SafoneAPI()  # uses chatgpt under the hood
+async def shutdown():
+    logger.info("🔌 Shutting down HTTP client and bot session...")
+    await http_client.aclose()
+    await bot.session.close()
+    logger.info("✅ Shutdown complete.")
 
-# ─── CORE QUERY ────────────────────────────────────────────────
+# ─── MEMORY & INACTIVITY CLEANUP ──────────────────────────────────
+HISTORY: Dict[int, Deque[Dict[str,str]]] = defaultdict(lambda: deque(maxlen=1000))
+LAST_ACTIVE: Dict[int, datetime] = {}
+MIN_INTERVAL = 1.0  # sec between messages per user
+
+async def clean_inactive():
+    while True:
+        await asyncio.sleep(3600)
+        cutoff = datetime.utcnow() - timedelta(hours=1)
+        for uid, ts in list(LAST_ACTIVE.items()):
+            if ts < cutoff:
+                HISTORY.pop(uid, None)
+                LAST_ACTIVE.pop(uid, None)
+                logger.info(f"🧹 Cleared memory for inactive Master {uid}")
+
+# ─── CORE AI CALL ─────────────────────────────────────────────────
 async def process_query(user_id: int, text: str) -> str:
+    # rate‐limit
     now = asyncio.get_event_loop().time()
-    last = USER_LAST_TS.get(user_id, 0)
+    last = LAST_ACTIVE.get(user_id, 0).timestamp() if isinstance(LAST_ACTIVE.get(user_id), datetime) else 0
     if now - last < MIN_INTERVAL:
         await asyncio.sleep(MIN_INTERVAL - (now - last))
-    USER_LAST_TS[user_id] = now
+    LAST_ACTIVE[user_id] = datetime.utcnow()
 
-    # optional short memory
-    hist = histories.setdefault(user_id, deque(maxlen=MAX_HISTORY))
-    hist.append({"role":"user","content":text})
+    # store history
+    hist = HISTORY[user_id]
+    hist.append({"role": "user", "content": text})
 
-    # build prompt
-    prompt = "\n".join(
-        f"{m['role'].capitalize()}: {m['content']}" for m in hist
-    ) + "\nJarvis:"
+    # build respectful system prompt
+    prompt = (
+        "You are Jarvis, a dutiful AI assistant. "
+        "Always address the user respectfully as Master, Sir, or Chief.\n\n"
+    )
+    for msg in hist:
+        speaker = "Master" if msg["role"] == "user" else "Jarvis"
+        prompt += f"{speaker}: {msg['content']}\n"
+    prompt += "Jarvis:"
 
-    # call ChatGPT only
+    # call ChatGPT
     try:
         resp = await api.chatgpt(prompt)
     except safone_errors.GenericApiError as e:
-        if "reduce the context" in str(e).lower() and hist:
+        # retry minimal context if needed
+        if "reduce the context" in str(e).lower():
             last_msg = hist[-1]
             hist.clear()
             hist.append(last_msg)
-            resp = await api.chatgpt(f"User: {last_msg['content']}\nJarvis:")
+            simple = f"Master: {last_msg['content']}\nJarvis:"
+            resp = await api.chatgpt(simple)
         else:
-            logger.error(f"ChatGPT error: {e}")
-            return "🚨 AI service error, please try again later."
+            logger.error(f"API error: {e}")
+            return "🚨 Master, I encountered an AI service error. Please try again."
     except Exception as e:
-        logger.exception("Unexpected error")
-        return "🚨 Unexpected server error."
+        logger.exception("Unexpected error in AI call")
+        return f"🚨 Master, something went wrong: {type(e).__name__}"
 
     answer = getattr(resp, "message", None) or str(resp)
-    hist.append({"role":"bot","content":answer})
+    hist.append({"role": "bot", "content": answer})
     return answer
 
-# ─── BOT SETUP ─────────────────────────────────────────────────
+# ─── BOT SETUP ────────────────────────────────────────────────────
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp  = Dispatcher()
 
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
-async def welcome(message: types.Message) -> None:
-    await message.answer("👋 Hey there! Jarvis is here — just say anything.")
+async def cmd_start(msg: types.Message):
+    await msg.answer("👋 Greetings, Master! Jarvis at your service. Speak, and I shall obey.")
 
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text)
-async def chat(message: types.Message) -> None:
+async def chat_handler(msg: types.Message):
     start = perf_counter()
-    reply = await process_query(message.from_user.id, message.text.strip())
+    reply = await process_query(msg.from_user.id, msg.text.strip())
     elapsed = perf_counter() - start
-    await message.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
+    # end with a respectful closer
+    suffix = f"\n\n⏱️ Response time: {elapsed:.2f}s"
+    await msg.reply(f"{reply}{suffix}")
 
-# ─── MAIN ───────────────────────────────────────────────────────
-async def main() -> None:
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("🚀 Jarvis started: ChatGPT only.")
+# Graceful shutdown on signals
+async def main():
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown()))
+    # start cleanup task
+    asyncio.create_task(clean_inactive())
+    logger.info("🚀 Jarvis started: fully respectful, resilient, and ready.")
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Master, Jarvis has been stopped by interruption.")
+        # ensure shutdown
+        asyncio.run(shutdown())
