@@ -3,7 +3,7 @@
 bot.py
 
 Jarvis v1.0.72 — ChatGPT-only core + self-update & top-error logging
-with extended long-polling timeouts.
+with extended polling timeouts and full enhancements.
 """
 
 import os
@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 MASTER_ID = os.getenv("MASTER_ID", "").strip()
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 if not MASTER_ID.isdigit():
@@ -49,8 +50,8 @@ logger = logging.getLogger("jarvis")
 api = SafoneAPI()
 http_client = httpx.AsyncClient(
     timeout=httpx.Timeout(
-        connect=5.0,    # fail fast
-        read=90.0,      # wait up to 90s for Telegram responses
+        connect=5.0,    # fail fast on connection issues
+        read=90.0,      # wait up to 90s for Telegram long-poll
         write=5.0,
         pool=None
     )
@@ -72,7 +73,7 @@ USER_LAST_TS: Dict[int, float] = {}
 MIN_INTERVAL = 1.0
 
 async def memory_cleanup() -> None:
-    """Every 10m, remove users inactive for >30m."""
+    """Every 10 m, purge users inactive for >30 m."""
     while True:
         await asyncio.sleep(600)
         now = asyncio.get_event_loop().time()
@@ -115,7 +116,6 @@ async def process_query(user_id: int, text: str) -> str:
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
 bot = Bot(
     token=BOT_TOKEN,
-    http_client=http_client,
     parse_mode=ParseMode.MARKDOWN
 )
 dp  = Dispatcher()
@@ -201,7 +201,7 @@ async def help_cmd(msg: types.Message) -> None:
         "• Ask anything naturally\n"
         "• ‘Jarvis restart’ to self-update\n"
         "• ‘Jarvis logs’ to root-cause errors\n"
-        "• Type any +888… number inline\n"
+        "• Inline +888… numbers for fragment.com links\n"
         "• ‘Jarvis review code’ for AI code suggestions\n",
         parse_mode=None
     )
@@ -232,12 +232,11 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
-    # ↑—extended polling timeouts here:
     await dp.start_polling(
         bot,
         skip_updates=True,
-        timeout=90,           # how long Telegram holds an update request
-        request_timeout=90    # how long httpx waits for any response
+        timeout=90,           # wait up to 90 s for updates
+        request_timeout=90    # wait up to 90 s for HTTP responses
     )
 
 if __name__ == "__main__":
