@@ -2,43 +2,40 @@
 """
 fragment_url.py
 
-Inline handler for 888‑prefixed URL generation.
+Inline handler: formats any number into a fragment.com URL.
 """
 
-import sys, re, uuid
-from typing import Final
-from aiogram import F
-from aiogram.types import InlineQueryResultArticle, InputTextMessageContent
+import sys
+import re
+from aiogram import types, F
+from aiogram.enums import ChatType
+from pathlib import Path
 
-# grab the running bot & dp out of __main__
+# Grab bot & dispatcher
 _main = sys.modules["__main__"]
-dp   = _main.dp
-bot  = _main.bot
-
-BASE_URL: Final[str] = "https://fragment.com/number/{number}/code"
+dp    = _main.dp
+bot   = _main.bot
 
 def format_fragment_url(raw: str) -> str:
-    num = re.sub(r"\D", "", raw.strip().lstrip("+"))
-    if not num:
-        raise ValueError("No digits found")
+    # strip non-digits, remove leading zeros/plus
+    num = re.sub(r"\D+", "", raw).lstrip("0")
     if not num.startswith("888"):
         num = "888" + num
-    return BASE_URL.format(number=num)
+    return f"https://fragment.com/number/{num}/code"
 
-@dp.inline_query(F.query)
-async def inline_fragment_handler(inline_q):
-    cleaned = re.sub(r"\D", "", inline_q.query)
-    if not cleaned:
-        return await bot.answer_inline_query(inline_q.id, results=[], cache_time=0)
-    try:
-        url = format_fragment_url(cleaned)
-    except ValueError:
-        return await bot.answer_inline_query(inline_q.id, results=[], cache_time=0)
-
-    article = InlineQueryResultArticle(
-        id=str(uuid.uuid4()),
-        title="Fragment check URL",
+@dp.inline_query(F.query.regexp(r".*"))
+async def inline_fragment(inl: types.InlineQuery):
+    raw = inl.query.strip()
+    cleaned = re.sub(r"\s+", "", raw).lstrip("+")
+    if not re.fullmatch(r"\d+", cleaned):
+        return
+    url = format_fragment_url(cleaned)
+    result = types.InlineQueryResultArticle(
+        id=inl.id,
+        title=f"Fragment URL → {cleaned}",
         description=url,
-        input_message_content=InputTextMessageContent(message_text=url)
+        input_message_content=types.InputTextMessageContent(
+            message_text=url
+        )
     )
-    await bot.answer_inline_query(inline_q.id, results=[article], cache_time=0)
+    await bot.answer_inline_query(inl.id, results=[result], cache_time=30)
