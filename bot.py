@@ -3,6 +3,7 @@
 bot.py
 
 Jarvis v1.0.72 — ChatGPT-only core + self-update & top-error logging
+with extended long-polling timeouts.
 """
 
 import os
@@ -26,7 +27,6 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 MASTER_ID = os.getenv("MASTER_ID", "").strip()
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 if not MASTER_ID.isdigit():
@@ -47,7 +47,14 @@ logger = logging.getLogger("jarvis")
 
 # ─── API CLIENT & HTTP SESSION ─────────────────────────────────
 api = SafoneAPI()
-http_client = httpx.AsyncClient(timeout=10.0)
+http_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(
+        connect=5.0,    # fail fast
+        read=90.0,      # wait up to 90s for Telegram responses
+        write=5.0,
+        pool=None
+    )
+)
 
 async def shutdown() -> None:
     """Graceful shutdown: close HTTP client & bot session."""
@@ -106,7 +113,11 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+bot = Bot(
+    token=BOT_TOKEN,
+    http_client=http_client,
+    parse_mode=ParseMode.MARKDOWN
+)
 dp  = Dispatcher()
 
 # ─── RESTART LOGIC (used by threat.py) ────────────────────────
@@ -221,7 +232,13 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
-    await dp.start_polling(bot, skip_updates=True)
+    # ↑—extended polling timeouts here:
+    await dp.start_polling(
+        bot,
+        skip_updates=True,
+        timeout=90,           # how long Telegram holds an update request
+        request_timeout=90    # how long httpx waits for any response
+    )
 
 if __name__ == "__main__":
     try:
