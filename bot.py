@@ -3,7 +3,7 @@
 bot.py
 
 Jarvis v1.0.73 — ChatGPT-only core + self-update, top-error logging,
-memory cleanup, graceful shutdown, and resilient AI plugins.
+memory cleanup, graceful shutdown, help trigger, and resilient AI plugins.
 """
 
 import os
@@ -51,12 +51,12 @@ api = SafoneAPI()
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=90.0))
 
 async def shutdown() -> None:
-    """Close HTTP clients & bot session gracefully."""
+    """Close HTTP client & bot session gracefully."""
     await http_client.aclose()
     await bot.session.close()
 
 def do_restart() -> None:
-    """Hot-restart this script in-place."""
+    """Hot-restart this script in place."""
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 # ─── MEMORY & RATE LIMIT ───────────────────────────────────────
@@ -117,14 +117,7 @@ dp = Dispatcher()
     F.text.regexp(r"(?i)^jarvis restart$")
 )
 async def restart_handler(msg: types.Message) -> None:
-    """
-    Self-update flow (after threat.py preflight):
-      • git pull
-      • pip3 install -r requirements.txt
-      • pip3 install --upgrade safoneapi
-      • summarise diff via ChatGPT
-      • restart
-    """
+    """Self-update flow: git pull → deps → diff summary → restart"""
     await msg.reply("⏳ Updating in background…")
 
     async def _do_update(chat_id: int):
@@ -132,7 +125,7 @@ async def restart_handler(msg: types.Message) -> None:
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        pull = run(["git","pull"])
+        pull = run(["git", "pull"])
         if pull.returncode != 0:
             return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}")
 
@@ -165,8 +158,7 @@ async def restart_handler(msg: types.Message) -> None:
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── PREFLIGHT GUARD ───────────────────────────────────────────
-# threat.py will import this restart_handler and wrap it with compile-check
-import threat
+import threat  # wraps restart_handler with preflight compile-check
 
 # ─── COMMANDS & HANDLERS ───────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -182,7 +174,7 @@ async def help_cmd(msg: types.Message) -> None:
         "🧠 I’m Jarvis! You can:\n"
         "• Ask anything naturally\n"
         "• ‘Jarvis restart’ to self-update\n"
-        "• ‘Jarvis logs’ for log analysis\n"
+        "• ‘Jarvis logs’ for error analysis\n"
         "• Inline +888… for fragment.com URLs\n"
         "• ‘Jarvis review code’ for AI suggestions\n"
     )
@@ -204,10 +196,9 @@ async def chat_handler(msg: types.Message) -> None:
 
 # ─── PLUGIN AUTO-LOAD ─────────────────────────────────────────
 PLUGIN_MODULES = [
-    "fragment_url",   # inline +888 handler
-    "logs_utils",     # AI log analysis
-    "code_review",    # “Jarvis review code”
-    # threat already imported above
+    "fragment_url",  # inline +888 handler
+    "logs_utils",    # AI log analysis
+    "code_review",   # “Jarvis review code”
 ]
 loaded = []
 for mod in PLUGIN_MODULES:
@@ -217,26 +208,19 @@ for mod in PLUGIN_MODULES:
         logger.info(f"✅ Plugin loaded: {mod}")
     except Exception as e:
         logger.error(f"❌ Failed to load plugin {mod!r}: {e}")
-        # notify master if desired:
         if MASTER_ID:
             asyncio.create_task(
-                bot.send_message(
-                    MASTER_ID,
-                    f"⚠️ Plugin `{mod}` failed to load:\n{e}"
-                )
+                bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` failed to load:\n{e}")
             )
 
 logger.info(f"Active plugins: {loaded}")
 
 # ─── MAIN ────────────────────────────────────────────────────────
 async def main() -> None:
-    # graceful shutdown on Ctrl+C / SIGTERM
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-    # start memory cleanup in background
     asyncio.create_task(memory_cleanup())
-    # begin polling (Aiogram defaults for timeouts)
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
