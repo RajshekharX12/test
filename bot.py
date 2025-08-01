@@ -2,9 +2,8 @@
 """
 bot.py
 
-Jarvis v1.0.76 — ChatGPT-only core + self-update, guards, logging,
-memory cleanup, graceful shutdown, help trigger, plugins,
-with truly infinite long-poll (no getUpdates timeouts).
+Jarvis v1.0.77 — ChatGPT-only core + self-update, preflight guard,
+logging plugins, memory cleanup, graceful shutdown & help trigger.
 """
 
 import os
@@ -17,12 +16,9 @@ from time import perf_counter
 from collections import deque
 from typing import Deque, Dict
 
-import aiohttp
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
-from aiogram.exceptions import TelegramNetworkError
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -30,7 +26,6 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 MASTER_ID = os.getenv("MASTER_ID", "").strip()
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 if not MASTER_ID.isdigit():
@@ -49,20 +44,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("jarvis")
 
-# ─── AI & HTTP CLIENTS ─────────────────────────────────────────
+# ─── AI CLIENT ──────────────────────────────────────────────────
 api = SafoneAPI()
 
-# Use an aiohttp session with no timeouts for Telegram polling
-aiohttp_timeout = aiohttp.ClientTimeout(total=None)
-aio_session = AiohttpSession(timeout=aiohttp_timeout)
-
 async def shutdown() -> None:
-    """Close both aiohttp & bot sessions cleanly."""
-    await aio_session.close()
+    """Close bot session on exit."""
     await bot.session.close()
 
 def do_restart() -> None:
-    """Hot-restart this script in place."""
+    """Hot-restart via execv."""
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 # ─── MEMORY & RATE LIMIT ───────────────────────────────────────
@@ -72,20 +62,21 @@ USER_LAST_TS: Dict[int, float] = {}
 MIN_INTERVAL = 1.0  # seconds per user
 
 async def memory_cleanup() -> None:
-    """Every 10m purge users inactive >30m to avoid memory leaks."""
+    """Every 10m, purge users inactive >30m to bound memory."""
     while True:
         await asyncio.sleep(600)
         now = asyncio.get_event_loop().time()
-        stale = [uid for uid, ts in USER_LAST_TS.items() if now - ts > 1800]
-        for uid in stale:
-            histories.pop(uid, None)
-            USER_LAST_TS.pop(uid, None)
+        stale = [u for u, t in USER_LAST_TS.items() if now - t > 1800]
+        for u in stale:
+            histories.pop(u, None)
+            USER_LAST_TS.pop(u, None)
         if stale:
             logger.info(f"🧹 Cleaned {len(stale)} inactive sessions")
 
 async def process_query(user_id: int, text: str) -> str:
-    """Append to short history, call ChatGPT, return Jarvis’s reply."""
-    now = asyncio.get_event_loop().time()
+    """Send short history + prompt → ChatGPT → return reply."""
+    loop = asyncio.get_event_loop()
+    now = loop.time()
     last = USER_LAST_TS.get(user_id, 0)
     if now - last < MIN_INTERVAL:
         await asyncio.sleep(MIN_INTERVAL - (now - last))
@@ -114,13 +105,13 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, session=aio_session, parse_mode=ParseMode.MARKDOWN)
-dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+dp  = Dispatcher()
 
 # ─── SELF-UPDATE / RESTART HANDLER ─────────────────────────────
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
 async def restart_handler(msg: types.Message) -> None:
-    """Pull latest code, install deps, summarise diff, then restart."""
+    """Pull latest code, install deps, summarise diff via GPT, then restart."""
     await msg.reply("⏳ Updating in background…")
 
     async def _do_update(chat_id: int):
@@ -128,13 +119,13 @@ async def restart_handler(msg: types.Message) -> None:
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        git = run(["git","pull"])
-        if git.returncode:
-            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{git.stderr}")
+        g = run(["git","pull"])
+        if g.returncode:
+            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{g.stderr}")
 
-        p1 = run(["pip3","install","-r","requirements.txt"])
-        if p1.returncode:
-            return await bot.send_message(chat_id, f"❌ pip install failed:\n{p1.stderr}")
+        i = run(["pip3","install","-r","requirements.txt"])
+        if i.returncode:
+            return await bot.send_message(chat_id, f"❌ pip install failed:\n{i.stderr}")
 
         run(["pip3","install","--upgrade","safoneapi"])
 
@@ -144,7 +135,7 @@ async def restart_handler(msg: types.Message) -> None:
 
         prompt = (
             f"Master, here’s the diff {old[:7]}→{new[:7]}:\n{diff}\n\n"
-            "Give me a concise, file-by-file summary; skip trivial edits."
+            "Please summarise file-by-file, skipping trivial edits."
         )
         try:
             r = await api.chatgpt(prompt)
@@ -161,7 +152,7 @@ async def restart_handler(msg: types.Message) -> None:
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── PRE-RESTART GUARD ──────────────────────────────────────────
-import threat   # ensures bot.py compiles before restart
+import threat   # verifies bot.py compiles before allowing restart
 
 # ─── HELP & CHAT HANDLERS ──────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -174,12 +165,12 @@ async def cmd_start(msg: types.Message) -> None:
 )
 async def help_cmd(msg: types.Message) -> None:
     await msg.reply(
-        "🧠 I’m Jarvis! You can:\n"
-        "• Ask naturally, no slash-commands needed\n"
-        "• ‘Jarvis restart’ to self-update\n"
-        "• ‘Jarvis logs’ for AI error analysis\n"
-        "• Inline +888… for fragment.com URLs\n"
-        "• ‘Jarvis review code’ for AI suggestions\n"
+        "🤖 I’m Jarvis! You can:\n"
+        "• Chat naturally—no slash commands\n"
+        "• “Jarvis restart” to self-update\n"
+        "• “Jarvis logs” for AI-driven error analysis\n"
+        "• Inline +888… for fragment URLs\n"
+        "• “Jarvis review code” for AI suggestions\n"
     )
 
 @dp.message(
@@ -199,46 +190,24 @@ async def chat_handler(msg: types.Message) -> None:
 
 # ─── PLUGIN AUTO-LOAD ──────────────────────────────────────────
 PLUGIN_MODULES = ["fragment_url", "logs_utils", "code_review"]
-loaded = []
+_loaded = []
 for mod in PLUGIN_MODULES:
     try:
         __import__(mod)
-        loaded.append(mod)
+        _loaded.append(mod)
         logger.info(f"✅ Plugin loaded: {mod}")
     except Exception as e:
-        logger.error(f"❌ Plugin {mod!r} failed to load: {e}")
+        logger.error(f"❌ Plugin `{mod}` failed to load: {e}")
         if MASTER_ID:
             asyncio.create_task(
-                bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` failed to load:\n{e}")
+                bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` load error:\n{e}")
             )
-logger.info(f"Active plugins: {loaded}")
+logger.info(f"Active plugins: {_loaded}")
 
-# ─── MAIN ────────────────────────────────────────────────────────
-async def main() -> None:
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-    asyncio.create_task(memory_cleanup())
+# ─── SCHEDULE MEMORY CLEANUP ───────────────────────────────────
+loop = asyncio.get_event_loop()
+loop.create_task(memory_cleanup())
 
-    # truly infinite long-poll: no getUpdates timeouts
-    while True:
-        try:
-            await dp.start_polling(
-                bot,
-                skip_updates=True,
-                timeout=90,
-                request_timeout=90
-            )
-            break
-        except TelegramNetworkError as e:
-            if "timeout" not in str(e).lower():
-                logger.warning("Network error: %s — retrying in 5s", e)
-            await asyncio.sleep(5)
-
+# ─── RUN POLLING ───────────────────────────────────────────────
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("👋 Jarvis stopped by user.")
-        asyncio.run(shutdown())
-
+    dp.run_polling(bot, skip_updates=True)
