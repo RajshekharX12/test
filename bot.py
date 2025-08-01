@@ -3,7 +3,7 @@
 bot.py
 
 Jarvis v1.0.73 — ChatGPT-only core + self-update, top-error logging,
-and robust long-poll timeouts via custom AiohttpSession.
+robust long-poll timeouts, memory cleanup, graceful shutdown, and AI plugins.
 """
 
 import os
@@ -33,7 +33,7 @@ MASTER_ID = os.getenv("MASTER_ID", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN must be set in .env")
 if not MASTER_ID.isdigit():
-    raise RuntimeError("MASTER_ID must be a numeric string in .env")
+    raise RuntimeError("MASTER_ID must be an integer in .env")
 MASTER_ID = int(MASTER_ID)
 
 # ─── LOGGING ───────────────────────────────────────────────────
@@ -48,40 +48,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger("jarvis")
 
-# ─── API CLIENT & HTTP SESSION ─────────────────────────────────
+# ─── API CLIENTS ────────────────────────────────────────────────
 api = SafoneAPI()
 
-# Keep a separate httpx client for external API calls:
+# httpx client for external (SafoneAPI) calls
 http_client = httpx.AsyncClient(
     timeout=httpx.Timeout(connect=5.0, read=90.0, write=5.0, pool=None)
 )
 
-# Create a custom Aiogram session with aiohttp timeouts:
+# aiohttp session for Telegram API with extended timeouts
 aiohttp_timeout = aiohttp.ClientTimeout(
-    total=90.0,      # max time for any request
-    connect=5.0,     # connect timeout
-    sock_connect=5.0,
-    sock_read=90.0   # read timeout (long‐poll)
+    total=None,         # no overall deadline
+    connect=20.0,       # allow up to 20s for connect/TLS handshake
+    sock_connect=20.0,
+    sock_read=120.0     # allow up to 120s for long-poll reads
 )
 aio_session = AiohttpSession(timeout=aiohttp_timeout)
 
+# ─── BOT & DISPATCHER ─────────────────────────────────────────
+bot = Bot(
+    token=BOT_TOKEN,
+    session=aio_session,
+    parse_mode=ParseMode.MARKDOWN
+)
+dp = Dispatcher()
+
 async def shutdown() -> None:
-    """Graceful shutdown: close HTTP clients & bot session."""
+    """Close HTTP clients & bot session gracefully."""
     await http_client.aclose()
     await bot.session.close()
 
 def do_restart() -> None:
-    """Hot-restart the script in-place."""
+    """Hot-restart this script in place."""
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
-# ─── MEMORY, RATE LIMIT & CLEANUP ─────────────────────────────
+# ─── MEMORY & RATE LIMIT ───────────────────────────────────────
 MAX_HISTORY = 6
 histories: Dict[int, Deque[Dict[str,str]]] = {}
 USER_LAST_TS: Dict[int, float] = {}
 MIN_INTERVAL = 1.0
 
 async def memory_cleanup() -> None:
-    """Every 10m, purge users inactive for >30m."""
+    """Every 10 min, remove users inactive for > 30 min."""
     while True:
         await asyncio.sleep(600)
         now = asyncio.get_event_loop().time()
@@ -93,6 +101,7 @@ async def memory_cleanup() -> None:
             logger.info(f"🧹 Cleaned {len(stale)} inactive users")
 
 async def process_query(user_id: int, text: str) -> str:
+    """Send user+history to ChatGPT and return Jarvis’s reply."""
     now = asyncio.get_event_loop().time()
     last = USER_LAST_TS.get(user_id, 0)
     if now - last < MIN_INTERVAL:
@@ -121,83 +130,73 @@ async def process_query(user_id: int, text: str) -> str:
     hist.append({"role":"bot","content":answer})
     return answer
 
-# ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = Bot(
-    token=BOT_TOKEN,
-    session=aio_session,             # use our custom aiohttp session
-    parse_mode=ParseMode.MARKDOWN
-)
-dp  = Dispatcher()
-
-# ─── RESTART LOGIC (used by threat.py) ────────────────────────
+# ─── RESTART HANDLER ───────────────────────────────────────────
 async def restart_handler(msg: types.Message) -> None:
     """
-    Self-update flow (after health checks):
+    After preflight check, self-update:
       • git pull
       • pip3 install -r requirements.txt
       • pip3 install --upgrade safoneapi
       • summarise diff via ChatGPT
       • restart
     """
-    await msg.reply("⏳ Updating in background…")
+    await msg.reply("⏳ Updating in background…", parse_mode=None)
 
     async def _do_update(chat_id: int):
         cwd = os.path.dirname(__file__)
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        pull = run(["git","pull"])
+        pull = run(["git", "pull"])
         if pull.returncode != 0:
-            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}")
+            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}", parse_mode=None)
 
-        deps = run(["pip3","install","-r","requirements.txt"])
+        deps = run(["pip3", "install", "-r", "requirements.txt"])
         if deps.returncode != 0:
-            return await bot.send_message(chat_id, f"❌ pip install failed:\n{deps.stderr}")
+            return await bot.send_message(chat_id, f"❌ pip install failed:\n{deps.stderr}", parse_mode=None)
 
-        run(["pip3","install","--upgrade","safoneapi"])
+        run(["pip3", "install", "--upgrade", "safoneapi"])
 
-        old = run(["git","rev-parse","HEAD@{1}"]).stdout.strip()
-        new = run(["git","rev-parse","HEAD"]).stdout.strip()
-        diff = run(["git","diff",old,new]).stdout.strip() or "No changes"
+        old = run(["git", "rev-parse", "HEAD@{1}"]).stdout.strip()
+        new = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        diff = run(["git", "diff", old, new]).stdout.strip() or "No changes"
 
         prompt = (
-            f"Master, diff {old}→{new}:\n{diff}\n\n"
+            f"Master, here’s the diff {old}→{new}:\n{diff}\n\n"
             "Give a concise, file-by-file summary; skip trivial edits."
         )
         try:
             resp = await api.chatgpt(prompt)
-            summary = getattr(resp,"message",str(resp))
+            summary = getattr(resp, "message", str(resp))
         except Exception as e:
             summary = f"⚠️ Summarisation failed: {e}"
 
         safe = f"```\n{summary[:3500]}\n```"
-        await bot.send_message(chat_id, "✅ Update complete!\n\n"+safe)
+        await bot.send_message(chat_id, "✅ Update complete!\n\n" + safe, parse_mode=None)
 
         await shutdown()
         do_restart()
 
     asyncio.create_task(_do_update(msg.from_user.id))
 
-# ─── IMPORT THE GUARD ─────────────────────────────────────────
-import threat    # preflight compile-check for restart
+# ─── PREFLIGHT GUARD ───────────────────────────────────────────
+import threat    # runs compile‐check before allowing restart
 
-# ─── COMMANDS & HANDLERS ─────────────────────────────────────
+# ─── COMMANDS & HANDLERS ───────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(msg: types.Message):
-    await msg.answer("👋 Greetings, Master! Jarvis is online — just say anything.")
+    await msg.answer("👋 Greetings, Master! Jarvis is online — just say anything.", parse_mode=None)
 
-@dp.message(
-    F.chat.type == ChatType.PRIVATE,
-    F.text.regexp(r"(?i)^(help|help me|what can you do)\??$")
-)
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^(help|help me|what can you do)\??$"))
 async def help_cmd(msg: types.Message):
     await msg.reply(
         "🧠 I’m Jarvis! You can:\n"
-        "• Ask naturally\n"
+        "• Ask anything naturally\n"
         "• ‘Jarvis restart’ to self-update\n"
         "• ‘Jarvis logs’ for root-cause errors\n"
         "• Inline +888… numbers for fragment.com links\n"
-        "• ‘Jarvis review code’ for AI suggestions\n"
+        "• ‘Jarvis review code’ for AI suggestions\n",
+        parse_mode=None
     )
 
 @dp.message(
@@ -210,14 +209,14 @@ async def chat_handler(msg: types.Message):
         start = perf_counter()
         reply = await process_query(msg.from_user.id, msg.text.strip())
         elapsed = perf_counter() - start
-        await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s")
+        await msg.reply(f"{reply}\n\n⏱️ {elapsed:.2f}s", parse_mode=None)
     except Exception:
         logger.exception("Error in chat handler")
-        await msg.reply("🚨 Unexpected error. Try again.")
+        await msg.reply("🚨 Unexpected error. Try again.", parse_mode=None)
 
 # ─── PLUGINS ────────────────────────────────────────────────────
-import fragment_url   # inline fragment.com URL
-import logs_utils     # AI log-analysis
+import fragment_url   # inline +888 handler
+import logs_utils     # AI log analysis
 import code_review    # “Jarvis review code”
 
 # ─── MAIN ────────────────────────────────────────────────────────
@@ -226,13 +225,11 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
-
-    # extended polling timeouts here:
     await dp.start_polling(
         bot,
         skip_updates=True,
-        timeout=90,           # how long Telegram holds each getUpdates
-        request_timeout=90    # how long aiohttp waits for any response
+        timeout=90,            # how long Telegram holds getUpdates
+        request_timeout=90     # how long aiohttp waits for any response
     )
 
 if __name__ == "__main__":
