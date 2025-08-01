@@ -2,7 +2,7 @@
 """
 bot.py
 
-Jarvis v1.0.78 — ChatGPT-only core + self-update, plugins & extended HTTP timeout
+Jarvis v1.0.78 — ChatGPT-only core + self-update, plugins & memory cleanup
 """
 
 import os
@@ -19,7 +19,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from aiogram.client.bot import DefaultBotProperties
-from aiohttp import ClientTimeout
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -108,10 +107,7 @@ async def process_query(user_id: int, text: str) -> str:
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.MARKDOWN,
-        timeout=ClientTimeout(total=60),
-    )
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
 )
 dp = Dispatcher()
 
