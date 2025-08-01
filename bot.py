@@ -2,9 +2,9 @@
 """
 bot.py
 
-Jarvis v1.0.74 — ChatGPT-only core + self-update, top-error logging,
-memory cleanup, graceful shutdown, help trigger, resilient AI plugins,
-and robust polling with timeout retries.
+Jarvis v1.0.76 — ChatGPT-only core + self-update, top-error logging,
+memory cleanup, graceful shutdown, help trigger, plugin auto-load,
+and robust long-poll with retry.
 """
 
 import os
@@ -50,10 +50,10 @@ logger = logging.getLogger("jarvis")
 
 # ─── API CLIENTS ────────────────────────────────────────────────
 api = SafoneAPI()
-http_client = httpx.AsyncClient(timeout=httpx.Timeout(5.0, read=90.0))
+http_client = httpx.AsyncClient(timeout=10.0)
 
 async def shutdown() -> None:
-    """Close HTTP client & bot session gracefully."""
+    """Graceful shutdown: close HTTP & bot sessions."""
     await http_client.aclose()
     await bot.session.close()
 
@@ -77,7 +77,7 @@ async def memory_cleanup() -> None:
             histories.pop(uid, None)
             USER_LAST_TS.pop(uid, None)
         if stale:
-            logger.info(f"🧹 Cleaned {len(stale)} inactive users")
+            logger.info(f"🧹 Cleaned {len(stale)} inactive sessions")
 
 async def process_query(user_id: int, text: str) -> str:
     """Send user+history to ChatGPT and return Jarvis’s reply."""
@@ -96,13 +96,14 @@ async def process_query(user_id: int, text: str) -> str:
     except safone_errors.GenericApiError as e:
         if "reduce the context" in str(e).lower() and hist:
             last_msg = hist[-1]
-            hist.clear(); hist.append(last_msg)
+            hist.clear()
+            hist.append(last_msg)
             resp = await api.chatgpt(f"User: {last_msg['content']}\nJarvis:")
         else:
             logger.error("ChatGPT API error: %s", e)
             return "🚨 AI service error, please try again later."
     except Exception:
-        logger.exception("Unexpected error")
+        logger.exception("Unexpected error in LLM call")
         return "🚨 Unexpected server error."
 
     answer = getattr(resp, "message", None) or str(resp)
@@ -113,13 +114,13 @@ async def process_query(user_id: int, text: str) -> str:
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 
-# ─── RESTART HANDLER ───────────────────────────────────────────
+# ─── SELF-UPDATE / RESTART HANDLER ─────────────────────────────
 @dp.message(
     F.chat.type == ChatType.PRIVATE,
     F.text.regexp(r"(?i)^jarvis restart$")
 )
 async def restart_handler(msg: types.Message) -> None:
-    """Self-update flow: git pull → deps → diff summary → restart."""
+    """Pull latest code, install deps, summarise diff, then restart."""
     await msg.reply("⏳ Updating in background…")
 
     async def _do_update(chat_id: int):
@@ -127,13 +128,13 @@ async def restart_handler(msg: types.Message) -> None:
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        pull = run(["git", "pull"])
-        if pull.returncode != 0:
-            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}")
+        git = run(["git","pull"])
+        if git.returncode != 0:
+            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{git.stderr}")
 
-        deps = run(["pip3","install","-r","requirements.txt"])
-        if deps.returncode != 0:
-            return await bot.send_message(chat_id, f"❌ pip install failed:\n{deps.stderr}")
+        p1 = run(["pip3","install","-r","requirements.txt"])
+        if p1.returncode != 0:
+            return await bot.send_message(chat_id, f"❌ pip install failed:\n{p1.stderr}")
 
         run(["pip3","install","--upgrade","safoneapi"])
 
@@ -142,12 +143,12 @@ async def restart_handler(msg: types.Message) -> None:
         diff = run(["git","diff", old, new]).stdout.strip() or "No changes"
 
         prompt = (
-            f"Master, here’s the diff {old}→{new}:\n{diff}\n\n"
-            "Give a concise, file-by-file summary; skip trivial edits."
+            f"Master, here’s the diff {old[:7]}→{new[:7]}:\n{diff}\n\n"
+            "Give me a concise, file-by-file summary; skip trivial edits."
         )
         try:
-            resp = await api.chatgpt(prompt)
-            summary = getattr(resp, "message", str(resp))
+            r = await api.chatgpt(prompt)
+            summary = getattr(r, "message", str(r))
         except Exception as e:
             summary = f"⚠️ Summarisation failed: {e}"
 
@@ -159,10 +160,10 @@ async def restart_handler(msg: types.Message) -> None:
 
     asyncio.create_task(_do_update(msg.from_user.id))
 
-# ─── PREFLIGHT GUARD ───────────────────────────────────────────
-import threat  # wraps restart_handler with compile-check
+# ─── PRE-RESTART GUARD ──────────────────────────────────────────
+import threat   # ensures bot.py compiles before restart
 
-# ─── COMMANDS & HANDLERS ───────────────────────────────────────
+# ─── HELP & CHAT HANDLERS ──────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
 async def cmd_start(msg: types.Message) -> None:
     await msg.answer("👋 Greetings, Master! Jarvis is online — just say anything.")
@@ -174,9 +175,9 @@ async def cmd_start(msg: types.Message) -> None:
 async def help_cmd(msg: types.Message) -> None:
     await msg.reply(
         "🧠 I’m Jarvis! You can:\n"
-        "• Ask anything naturally\n"
+        "• Ask naturally, no slash-commands needed\n"
         "• ‘Jarvis restart’ to self-update\n"
-        "• ‘Jarvis logs’ for error analysis\n"
+        "• ‘Jarvis logs’ for AI error analysis\n"
         "• Inline +888… for fragment.com URLs\n"
         "• ‘Jarvis review code’ for AI suggestions\n"
     )
@@ -196,12 +197,8 @@ async def chat_handler(msg: types.Message) -> None:
         logger.exception("Error in chat handler")
         await msg.reply("🚨 Unexpected error. Try again.")
 
-# ─── PLUGIN AUTO-LOAD ─────────────────────────────────────────
-PLUGIN_MODULES = [
-    "fragment_url",  # inline +888 handler
-    "logs_utils",    # AI log analysis
-    "code_review",   # “Jarvis review code”
-]
+# ─── PLUGIN AUTO-LOAD ──────────────────────────────────────────
+PLUGIN_MODULES = ["fragment_url", "logs_utils", "code_review"]
 loaded = []
 for mod in PLUGIN_MODULES:
     try:
@@ -214,7 +211,6 @@ for mod in PLUGIN_MODULES:
             asyncio.create_task(
                 bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` failed to load:\n{e}")
             )
-
 logger.info(f"Active plugins: {loaded}")
 
 # ─── MAIN ────────────────────────────────────────────────────────
@@ -224,14 +220,14 @@ async def main() -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
 
-    # robust polling with retry on network timeouts
+    # robust polling: 90s getUpdates + 90s per-request timeout
     while True:
         try:
             await dp.start_polling(
                 bot,
                 skip_updates=True,
-                timeout=90,           # long-poll duration
-                request_timeout=90    # per-request HTTP timeout
+                timeout=90,
+                request_timeout=90
             )
             break
         except TelegramNetworkError as e:
@@ -242,5 +238,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Stopped by user.")
+        logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
