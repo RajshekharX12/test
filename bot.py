@@ -2,8 +2,7 @@
 """
 bot.py
 
-Jarvis v1.0.77 — ChatGPT-only core + self-update, preflight guard,
-logging plugins, memory cleanup, graceful shutdown & help trigger.
+Jarvis v1.0.78 — ChatGPT-only core + self-update, plugins & extended HTTP timeout
 """
 
 import os
@@ -16,9 +15,11 @@ from time import perf_counter
 from collections import deque
 from typing import Deque, Dict
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
+from aiogram.client.bot import DefaultBotProperties
+from aiohttp import ClientTimeout
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -105,8 +106,14 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
-dp  = Dispatcher()
+bot = types.Bot(  # note: use types.Bot alias so code highlight picks it up
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.MARKDOWN,
+        timeout=ClientTimeout(total=60),  # 60s per Telegram HTTP request
+    )
+)
+dp = Dispatcher()
 
 # ─── SELF-UPDATE / RESTART HANDLER ─────────────────────────────
 @dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
@@ -197,7 +204,7 @@ for mod in PLUGIN_MODULES:
         _loaded.append(mod)
         logger.info(f"✅ Plugin loaded: {mod}")
     except Exception as e:
-        logger.error(f"❌ Plugin `{mod}` failed to load: {e}")
+        logger.error(f"❌ Plugin `{mod}` load error: {e}")
         if MASTER_ID:
             asyncio.create_task(
                 bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` load error:\n{e}")
@@ -205,8 +212,7 @@ for mod in PLUGIN_MODULES:
 logger.info(f"Active plugins: {_loaded}")
 
 # ─── SCHEDULE MEMORY CLEANUP ───────────────────────────────────
-loop = asyncio.get_event_loop()
-loop.create_task(memory_cleanup())
+asyncio.get_event_loop().create_task(memory_cleanup())
 
 # ─── RUN POLLING ───────────────────────────────────────────────
 if __name__ == "__main__":
