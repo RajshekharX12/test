@@ -2,9 +2,9 @@
 """
 bot.py
 
-Jarvis v1.0.76 — ChatGPT-only core + self-update, top-error logging,
-memory cleanup, graceful shutdown, help trigger, plugin auto-load,
-and robust long-poll with retry.
+Jarvis v1.0.76 — ChatGPT-only core + self-update, guards, logging,
+memory cleanup, graceful shutdown, help trigger, plugins,
+with truly infinite long-poll (no getUpdates timeouts).
 """
 
 import os
@@ -17,8 +17,9 @@ from time import perf_counter
 from collections import deque
 from typing import Deque, Dict
 
-import httpx
+import aiohttp
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramNetworkError
@@ -37,24 +38,27 @@ if not MASTER_ID.isdigit():
 MASTER_ID = int(MASTER_ID)
 
 # ─── LOGGING ───────────────────────────────────────────────────
-log_path = os.path.join(os.path.dirname(__file__), "bot.log")
+LOG_PATH = os.path.join(os.path.dirname(__file__), "bot.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(log_path, encoding="utf-8"),
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
     ]
 )
 logger = logging.getLogger("jarvis")
 
-# ─── API CLIENTS ────────────────────────────────────────────────
+# ─── AI & HTTP CLIENTS ─────────────────────────────────────────
 api = SafoneAPI()
-http_client = httpx.AsyncClient(timeout=10.0)
+
+# Make a session with no timeouts for Telegram polling
+aiohttp_timeout = aiohttp.ClientTimeout(total=None)
+aio_session = AiohttpSession(timeout=aiohttp_timeout)
 
 async def shutdown() -> None:
-    """Graceful shutdown: close HTTP & bot sessions."""
-    await http_client.aclose()
+    """Close both aiohttp & bot sessions cleanly."""
+    await aio_session.close()
     await bot.session.close()
 
 def do_restart() -> None:
@@ -65,10 +69,10 @@ def do_restart() -> None:
 MAX_HISTORY = 6
 histories: Dict[int, Deque[Dict[str,str]]] = {}
 USER_LAST_TS: Dict[int, float] = {}
-MIN_INTERVAL = 1.0
+MIN_INTERVAL = 1.0  # seconds per user
 
 async def memory_cleanup() -> None:
-    """Every 10 min, purge users inactive for >30 min."""
+    """Every 10m purge users inactive >30m to avoid memory leaks."""
     while True:
         await asyncio.sleep(600)
         now = asyncio.get_event_loop().time()
@@ -80,7 +84,7 @@ async def memory_cleanup() -> None:
             logger.info(f"🧹 Cleaned {len(stale)} inactive sessions")
 
 async def process_query(user_id: int, text: str) -> str:
-    """Send user+history to ChatGPT and return Jarvis’s reply."""
+    """Append to short history, call ChatGPT, return Jarvis’s reply."""
     now = asyncio.get_event_loop().time()
     last = USER_LAST_TS.get(user_id, 0)
     if now - last < MIN_INTERVAL:
@@ -96,8 +100,7 @@ async def process_query(user_id: int, text: str) -> str:
     except safone_errors.GenericApiError as e:
         if "reduce the context" in str(e).lower() and hist:
             last_msg = hist[-1]
-            hist.clear()
-            hist.append(last_msg)
+            hist.clear(); hist.append(last_msg)
             resp = await api.chatgpt(f"User: {last_msg['content']}\nJarvis:")
         else:
             logger.error("ChatGPT API error: %s", e)
@@ -111,14 +114,11 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.MARKDOWN)
+bot = Bot(token=BOT_TOKEN, session=aio_session, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 
 # ─── SELF-UPDATE / RESTART HANDLER ─────────────────────────────
-@dp.message(
-    F.chat.type == ChatType.PRIVATE,
-    F.text.regexp(r"(?i)^jarvis restart$")
-)
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text.regexp(r"(?i)^jarvis restart$"))
 async def restart_handler(msg: types.Message) -> None:
     """Pull latest code, install deps, summarise diff, then restart."""
     await msg.reply("⏳ Updating in background…")
@@ -129,11 +129,11 @@ async def restart_handler(msg: types.Message) -> None:
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
         git = run(["git","pull"])
-        if git.returncode != 0:
+        if git.returncode:
             return await bot.send_message(chat_id, f"❌ Git pull failed:\n{git.stderr}")
 
         p1 = run(["pip3","install","-r","requirements.txt"])
-        if p1.returncode != 0:
+        if p1.returncode:
             return await bot.send_message(chat_id, f"❌ pip install failed:\n{p1.stderr}")
 
         run(["pip3","install","--upgrade","safoneapi"])
@@ -161,7 +161,7 @@ async def restart_handler(msg: types.Message) -> None:
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── PRE-RESTART GUARD ──────────────────────────────────────────
-import threat   # ensures bot.py compiles before restart
+import threat  # ensures bot.py compiles before restart
 
 # ─── HELP & CHAT HANDLERS ──────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -220,7 +220,7 @@ async def main() -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
 
-    # robust polling: 90s getUpdates + 90s per-request timeout
+    # robust polling: 90s getUpdates + 90s HTTP timeout
     while True:
         try:
             await dp.start_polling(
@@ -231,7 +231,9 @@ async def main() -> None:
             )
             break
         except TelegramNetworkError as e:
-            logger.warning("Network error during polling: %s — retrying in 5s", e)
+            # ignore pure long-poll timeouts, retry other errors
+            if "timeout" not in str(e).lower():
+                logger.warning("Network error: %s — retrying in 5s", e)
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
