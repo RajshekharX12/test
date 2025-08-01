@@ -20,7 +20,6 @@ from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from aiogram.client.bot import DefaultBotProperties
 from aiohttp import ClientTimeout
-
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -111,7 +110,7 @@ bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(
         parse_mode=ParseMode.MARKDOWN,
-        timeout=ClientTimeout(total=60),  # 60s per Telegram HTTP request
+        timeout=ClientTimeout(total=60),
     )
 )
 dp = Dispatcher()
@@ -127,13 +126,13 @@ async def restart_handler(msg: types.Message) -> None:
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        pull = run(["git","pull"])
-        if pull.returncode:
-            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}")
+        g = run(["git","pull"])
+        if g.returncode:
+            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{g.stderr}")
 
-        deps = run(["pip3","install","-r","requirements.txt"])
-        if deps.returncode:
-            return await bot.send_message(chat_id, f"❌ pip install failed:\n{deps.stderr}")
+        i = run(["pip3","install","-r","requirements.txt"])
+        if i.returncode:
+            return await bot.send_message(chat_id, f"❌ pip install failed:\n{i.stderr}")
 
         run(["pip3","install","--upgrade","safoneapi"])
 
@@ -174,7 +173,7 @@ async def cmd_start(msg: types.Message) -> None:
 async def help_cmd(msg: types.Message) -> None:
     await msg.reply(
         "🤖 I’m Jarvis! You can:\n"
-        "• Chat naturally—no commands\n"
+        "• Chat naturally—no slash commands\n"
         "• “Jarvis restart” to self-update\n"
         "• “Jarvis logs” for AI-driven error analysis\n"
         "• Inline +888… for fragment URLs\n"
