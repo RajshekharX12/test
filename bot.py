@@ -15,11 +15,12 @@ from time import perf_counter
 from collections import deque
 from typing import Deque, Dict
 
-from aiogram import Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
 from aiogram.client.bot import DefaultBotProperties
 from aiohttp import ClientTimeout
+
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -106,7 +107,7 @@ async def process_query(user_id: int, text: str) -> str:
     return answer
 
 # ─── TELEGRAM BOT SETUP ────────────────────────────────────────
-bot = types.Bot(  # note: use types.Bot alias so code highlight picks it up
+bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(
         parse_mode=ParseMode.MARKDOWN,
@@ -126,13 +127,13 @@ async def restart_handler(msg: types.Message) -> None:
         def run(cmd):
             return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
 
-        g = run(["git","pull"])
-        if g.returncode:
-            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{g.stderr}")
+        pull = run(["git","pull"])
+        if pull.returncode:
+            return await bot.send_message(chat_id, f"❌ Git pull failed:\n{pull.stderr}")
 
-        i = run(["pip3","install","-r","requirements.txt"])
-        if i.returncode:
-            return await bot.send_message(chat_id, f"❌ pip install failed:\n{i.stderr}")
+        deps = run(["pip3","install","-r","requirements.txt"])
+        if deps.returncode:
+            return await bot.send_message(chat_id, f"❌ pip install failed:\n{deps.stderr}")
 
         run(["pip3","install","--upgrade","safoneapi"])
 
@@ -173,7 +174,7 @@ async def cmd_start(msg: types.Message) -> None:
 async def help_cmd(msg: types.Message) -> None:
     await msg.reply(
         "🤖 I’m Jarvis! You can:\n"
-        "• Chat naturally—no slash commands\n"
+        "• Chat naturally—no commands\n"
         "• “Jarvis restart” to self-update\n"
         "• “Jarvis logs” for AI-driven error analysis\n"
         "• Inline +888… for fragment URLs\n"
