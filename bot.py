@@ -2,8 +2,9 @@
 """
 bot.py
 
-Jarvis v1.0.73 — ChatGPT-only core + self-update, top-error logging,
-memory cleanup, graceful shutdown, help trigger, and resilient AI plugins.
+Jarvis v1.0.74 — ChatGPT-only core + self-update, top-error logging,
+memory cleanup, graceful shutdown, help trigger, resilient AI plugins,
+and robust polling with timeout retries.
 """
 
 import os
@@ -20,6 +21,7 @@ import httpx
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatType
 from aiogram.filters import CommandStart
+from aiogram.exceptions import TelegramNetworkError
 from SafoneAPI import SafoneAPI, errors as safone_errors
 from dotenv import load_dotenv
 
@@ -66,7 +68,7 @@ USER_LAST_TS: Dict[int, float] = {}
 MIN_INTERVAL = 1.0
 
 async def memory_cleanup() -> None:
-    """Every 10 min, purge users inactive for > 30 min."""
+    """Every 10 min, purge users inactive for >30 min."""
     while True:
         await asyncio.sleep(600)
         now = asyncio.get_event_loop().time()
@@ -117,7 +119,7 @@ dp = Dispatcher()
     F.text.regexp(r"(?i)^jarvis restart$")
 )
 async def restart_handler(msg: types.Message) -> None:
-    """Self-update flow: git pull → deps → diff summary → restart"""
+    """Self-update flow: git pull → deps → diff summary → restart."""
     await msg.reply("⏳ Updating in background…")
 
     async def _do_update(chat_id: int):
@@ -158,7 +160,7 @@ async def restart_handler(msg: types.Message) -> None:
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── PREFLIGHT GUARD ───────────────────────────────────────────
-import threat  # wraps restart_handler with preflight compile-check
+import threat  # wraps restart_handler with compile-check
 
 # ─── COMMANDS & HANDLERS ───────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -207,7 +209,7 @@ for mod in PLUGIN_MODULES:
         loaded.append(mod)
         logger.info(f"✅ Plugin loaded: {mod}")
     except Exception as e:
-        logger.error(f"❌ Failed to load plugin {mod!r}: {e}")
+        logger.error(f"❌ Plugin {mod!r} failed to load: {e}")
         if MASTER_ID:
             asyncio.create_task(
                 bot.send_message(MASTER_ID, f"⚠️ Plugin `{mod}` failed to load:\n{e}")
@@ -221,7 +223,20 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
-    await dp.start_polling(bot, skip_updates=True)
+
+    # robust polling with retry on network timeouts
+    while True:
+        try:
+            await dp.start_polling(
+                bot,
+                skip_updates=True,
+                timeout=90,           # long-poll duration
+                request_timeout=90    # per-request HTTP timeout
+            )
+            break
+        except TelegramNetworkError as e:
+            logger.warning("Network error during polling: %s — retrying in 5s", e)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try:
