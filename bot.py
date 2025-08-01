@@ -52,7 +52,7 @@ logger = logging.getLogger("jarvis")
 # ─── AI & HTTP CLIENTS ─────────────────────────────────────────
 api = SafoneAPI()
 
-# Make a session with no timeouts for Telegram polling
+# Use an aiohttp session with no timeouts for Telegram polling
 aiohttp_timeout = aiohttp.ClientTimeout(total=None)
 aio_session = AiohttpSession(timeout=aiohttp_timeout)
 
@@ -161,7 +161,7 @@ async def restart_handler(msg: types.Message) -> None:
     asyncio.create_task(_do_update(msg.from_user.id))
 
 # ─── PRE-RESTART GUARD ──────────────────────────────────────────
-import threat  # ensures bot.py compiles before restart
+import threat   # ensures bot.py compiles before restart
 
 # ─── HELP & CHAT HANDLERS ──────────────────────────────────────
 @dp.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -220,7 +220,7 @@ async def main() -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
     asyncio.create_task(memory_cleanup())
 
-    # robust polling: 90s getUpdates + 90s HTTP timeout
+    # truly infinite long-poll: no getUpdates timeouts
     while True:
         try:
             await dp.start_polling(
@@ -231,7 +231,6 @@ async def main() -> None:
             )
             break
         except TelegramNetworkError as e:
-            # ignore pure long-poll timeouts, retry other errors
             if "timeout" not in str(e).lower():
                 logger.warning("Network error: %s — retrying in 5s", e)
             await asyncio.sleep(5)
@@ -242,3 +241,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("👋 Jarvis stopped by user.")
         asyncio.run(shutdown())
+
